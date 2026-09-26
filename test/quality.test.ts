@@ -40,4 +40,26 @@ describe("assertProfileAllowed", () => {
   it("throws when profile is not offered", () => {
     assert.throws(() => assertProfileAllowed(baseSource, "2160p"), /not offered/i);
   });
+
+  it("allows 2160p when encoder path and allow4k are satisfied", () => {
+    const source: SourceFacts = {
+      ...baseSource,
+      height: 2160,
+      encoder2160: true,
+      allow4k: true,
+    };
+    assert.doesNotThrow(() => assertProfileAllowed(source, "2160p"));
+    const badge = deliveryBadge(source, "2160p");
+    assert.match(badge.label, /transcode/i);
+  });
+
+  it("gates 2160p when allow4k is false even with encoder path", () => {
+    const source: SourceFacts = {
+      ...baseSource,
+      height: 2160,
+      encoder2160: true,
+      allow4k: false,
+    };
+    assert.throws(() => assertProfileAllowed(source, "2160p"), /not offered/i);
+  });
 });

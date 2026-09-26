@@ -39,7 +39,7 @@ let demoInitStarted = false;
 function scheduleDemoMedia(): void {
   if (demoInitStarted) return;
   if (process.env.ELTORRENTO_DB === ":memory:") return;
-  if (process.env.NODE_ENV === "test") return;
+  if (process.env.NODE_ENV === "test" || process.env.ELTORRENTO_DEMO === "0") return;
   demoInitStarted = true;
   void import("./media")
     .then(async (media) => {

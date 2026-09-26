@@ -85,7 +85,7 @@ export function Player({ id }: { id: string }) {
           </div>
           {manifest ? (
             <p className={manifest.badge.showSuccess ? "text-sm text-[var(--sand)]" : "text-sm text-amber-200"}>
-              {manifest.badge.showSuccess ? manifest.badge.label : manifest.badge.label}
+              {manifest.badge.label}
               <span className="mt-1 block text-[var(--muted)]">{manifest.badge.detail}</span>
             </p>
           ) : null}

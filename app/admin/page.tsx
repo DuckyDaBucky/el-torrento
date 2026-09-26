@@ -29,6 +29,24 @@ type PublicUser = {
   streamQuota: number;
   remoteBitrateKbps: number;
   allow4k: boolean;
+  links: { service: string; externalId: string | null; syncError: string | null }[];
+};
+
+const POWERABLE_GUESTS = new Set(["media-storage", "media-apps", "media-ingest"]);
+
+const DEPLOY_TEMPLATE = {
+  name: "el-torrento-api",
+  targetGuest: "media-apps",
+  image: "ghcr.io/hasnain-niazi/el-torrento-api@sha256:0000000000000000000000000000000000000000000000000000000000000001",
+  cpu: 1,
+  memoryMb: 512,
+  diskMb: 2048,
+  ports: [3000],
+  network: "bridge",
+  secretRefs: ["jellyfin-api-key"],
+  volumes: ["/mnt/media/config:/config:ro"],
+  healthcheck: "curl -f http://127.0.0.1:3000/api/auth || exit 1",
+  restart: "unless-stopped",
 };
 
 async function api<T>(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; data: T }> {
@@ -126,6 +144,9 @@ export default function AdminPage() {
   const [agentConfigured, setAgentConfigured] = useState(false);
   const [mcpTools, setMcpTools] = useState<string[]>([]);
   const [message, setMessage] = useState("");
+  const [deployDraft, setDeployDraft] = useState(() => JSON.stringify(DEPLOY_TEMPLATE, null, 2));
+  const [deployPreview, setDeployPreview] = useState<{ id: string; digest: string } | null>(null);
+  const [deployIssues, setDeployIssues] = useState<string[]>([]);
 
   const preflightById = useMemo(() => {
     const map = new Map<string, { ram: string; root: string; thinPool: string }>();
@@ -340,6 +361,7 @@ export default function AdminPage() {
                     <th className="p-2">Role</th>
                     <th className="p-2">Status</th>
                     <th className="p-2">Quotas</th>
+                    <th className="p-2">Jellyfin / Seerr</th>
                     <th className="p-2">Actions</th>
                   </tr>
                 </thead>
@@ -353,11 +375,40 @@ export default function AdminPage() {
                         req {user.requestQuota} · strm {user.streamQuota} · {user.remoteBitrateKbps} kbps
                         {user.allow4k ? " · 4k" : ""}
                       </td>
+                      <td className="p-2 text-[10px] text-[var(--phosphor)]/70">
+                        {(user.links ?? []).length === 0 ? (
+                          "—"
+                        ) : (
+                          <ul className="space-y-0.5">
+                            {(user.links ?? []).map((link) => (
+                              <li key={link.service}>
+                                {link.service}: {link.externalId ?? "—"}
+                                {link.syncError ? ` (${link.syncError})` : ""}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </td>
                       <td className="p-2">
                         {user.role === "owner" ? (
                           <span className="text-[var(--phosphor)]/50">—</span>
                         ) : (
                           <div className="flex flex-wrap gap-1">
+                            <Button
+                              variant="term"
+                              className="px-2 py-1 text-[10px]"
+                              onClick={async () => {
+                                const { ok, data } = await api<{ error?: string }>("/api/admin/users", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ action: "sync", userId: user.id }),
+                                });
+                                setMessage(ok ? "Sync requested for Jellyfin and Seerr." : (data.error ?? "Sync failed."));
+                                loadUsers().catch(() => undefined);
+                              }}
+                            >
+                              sync
+                            </Button>
                             {(["active", "suspended", "revoked"] as const).map((status) => (
                               <Button
                                 key={status}
@@ -465,30 +516,133 @@ export default function AdminPage() {
                       {guest.id} (VM {guest.vmid}) — {guest.note}
                     </span>
                     <div className="flex gap-1">
-                      {(["start", "shutdown"] as const).map((action) => (
-                        <Button
-                          key={action}
-                          variant="term"
-                          className="px-2 py-1 text-[10px]"
-                          onClick={async () => {
-                            const { ok, data } = await api<{ message?: string }>("/api/admin/guests", {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ guest: guest.id, action }),
-                            });
-                            setMessage(data.message ?? (ok ? "Accepted." : "Refused."));
-                          }}
-                        >
-                          {action}
-                        </Button>
-                      ))}
+                      {POWERABLE_GUESTS.has(guest.id)
+                        ? (["start", "shutdown"] as const).map((action) => (
+                            <Button
+                              key={action}
+                              variant="term"
+                              className="px-2 py-1 text-[10px]"
+                              onClick={async () => {
+                                if (
+                                  guest.id === "media-storage" &&
+                                  action === "shutdown" &&
+                                  !window.confirm(
+                                    "Shutdown media-storage drops the NFS library export. Playback and ingest lose storage until it is started again. Continue?",
+                                  )
+                                ) {
+                                  return;
+                                }
+                                const { ok, data } = await api<{ message?: string }>("/api/admin/guests", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ guest: guest.id, action }),
+                                });
+                                setMessage(data.message ?? (ok ? "Accepted." : "Refused."));
+                              }}
+                            >
+                              {action}
+                            </Button>
+                          ))
+                        : (
+                            <span className="text-[var(--phosphor)]/50">power not delegated</span>
+                          )}
                     </div>
                   </div>
                 </li>
               ))}
             </ul>
+            <div className="space-y-3">
+              <h2 className="text-xs uppercase tracking-widest text-[var(--phosphor)]/70">Deploy preview / apply</h2>
+              <p className="text-xs text-[var(--phosphor)]/60">
+                Edit JSON, preview to store a digest, then apply the same digest. Images must stay pinned with @sha256.
+              </p>
+              <textarea
+                className="min-h-[220px] w-full border border-[var(--term-line)] bg-black/40 p-3 font-mono text-[11px] text-[var(--phosphor)]"
+                value={deployDraft}
+                onChange={(event) => {
+                  setDeployDraft(event.target.value);
+                  setDeployPreview(null);
+                  setDeployIssues([]);
+                }}
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="term"
+                  onClick={async () => {
+                    setMessage("");
+                    setDeployIssues([]);
+                    let plan: unknown;
+                    try {
+                      plan = JSON.parse(deployDraft);
+                    } catch {
+                      setMessage("Deploy JSON is not valid.");
+                      return;
+                    }
+                    const { ok, data } = await api<{
+                      id?: string;
+                      digest?: string;
+                      issues?: { message: string }[];
+                      error?: string;
+                    }>("/api/admin/deploy", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ action: "preview", plan }),
+                    });
+                    if (!ok) {
+                      if (data.issues?.length) setDeployIssues(data.issues.map((item) => item.message));
+                      else setMessage(data.error ?? "Preview refused.");
+                      return;
+                    }
+                    if (data.id && data.digest) setDeployPreview({ id: data.id, digest: data.digest });
+                    setMessage(`Preview stored · ${data.digest?.slice(0, 12)}…`);
+                    loadServices().catch(() => undefined);
+                  }}
+                >
+                  Preview
+                </Button>
+                <Button
+                  variant="term"
+                  disabled={!deployPreview}
+                  onClick={async () => {
+                    if (!deployPreview) return;
+                    if (
+                      !window.confirm(
+                        "Apply sends this plan to the deploy agent when configured. Continue with the previewed digest?",
+                      )
+                    ) {
+                      return;
+                    }
+                    const { ok, data } = await api<{ error?: string; message?: string }>("/api/admin/deploy", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        action: "apply",
+                        id: deployPreview.id,
+                        digest: deployPreview.digest,
+                      }),
+                    });
+                    setMessage(data.message ?? data.error ?? (ok ? "Apply accepted." : "Apply failed."));
+                    loadServices().catch(() => undefined);
+                  }}
+                >
+                  Apply preview
+                </Button>
+              </div>
+              {deployIssues.length ? (
+                <ul className="text-xs text-red-300">
+                  {deployIssues.map((issue) => (
+                    <li key={issue}>{issue}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {deployPreview ? (
+                <p className="text-xs text-[var(--phosphor)]/70">
+                  Ready to apply plan {deployPreview.id} · digest {deployPreview.digest.slice(0, 16)}…
+                </p>
+              ) : null}
+            </div>
             <div>
-              <h2 className="mb-2 text-xs uppercase tracking-widest text-[var(--phosphor)]/70">Deploy plans</h2>
+              <h2 className="mb-2 text-xs uppercase tracking-widest text-[var(--phosphor)]/70">Deploy history</h2>
               <ul className="space-y-1 text-xs text-[var(--phosphor)]/80">
                 {deployPlans.map((plan) => (
                   <li key={plan.id}>
