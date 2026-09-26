@@ -2,14 +2,16 @@ import type { UserRow } from "./db";
 import { audit } from "./db";
 
 export const APPROVED_GUESTS = [
-  { id: "media-playback", vmid: 100, note: "Existing VM. Power is not delegated in this deployment." },
-  { id: "media-storage", vmid: 101, note: "Storage. Shutdown warns because the library export lives here." },
-  { id: "media-apps", vmid: 102, note: "Apps and the management worker." },
+  { id: "media-playback", vmid: 100, note: "VM 100. Power is not delegated." },
+  { id: "media-storage", vmid: 101, note: "Storage. Shutdown drops the library export." },
+  { id: "media-apps", vmid: 102, note: "Apps VM 192.168.4.52. Power is not delegated." },
   { id: "media-ingest", vmid: 103, note: "Downloader only." },
 ] as const;
 
-const POWERABLE = new Set(["media-storage", "media-apps", "media-ingest"]);
+const POWERABLE = new Set(["media-storage", "media-ingest"]);
 const ACTIONS = new Set(["start", "shutdown"]);
+const POWER_OFF = new Set(["stop", "poweroff", "power-off", "reset", "reboot", "suspend", "delete"]);
+const NOT_DELEGATED = new Set(["media-playback", "media-apps", "100", "102", "192.168.4.52"]);
 
 export type GuestActionResult = {
   ok: boolean;
@@ -33,21 +35,30 @@ export async function requestGuestAction(input: {
   if (input.actor.role !== "owner" || input.actor.status !== "active") {
     return { ok: false, status: 403, message: "Owner access is required.", upstreamTaskId: null };
   }
+  if (POWER_OFF.has(input.action)) {
+    audit(input.actor.id, input.action, input.guest, "rejected", "Power off is not allowlisted.");
+    return {
+      ok: false,
+      status: 403,
+      message: "Power off is not allowlisted. VM 100 and the apps VM .52 cannot be powered off.",
+      upstreamTaskId: null,
+    };
+  }
   if (!ACTIONS.has(input.action)) {
     audit(input.actor.id, input.action, input.guest, "rejected", "Action is not allowlisted.");
     return {
       ok: false,
       status: 403,
-      message: "That action is not available. Forced stop, delete, and node power are refused.",
+      message: "That action is not available. Only start and shutdown are allowlisted.",
       upstreamTaskId: null,
     };
   }
-  if (input.guest === "media-playback") {
-    audit(input.actor.id, input.action, input.guest, "rejected", "VM 100 power is not delegated.");
+  if (NOT_DELEGATED.has(input.guest)) {
+    audit(input.actor.id, input.action, input.guest, "rejected", "VM 100 and apps VM .52 are not delegated.");
     return {
       ok: false,
       status: 403,
-      message: "Playback stays on VM 100. Its power is not delegated.",
+      message: "VM 100 and the apps VM .52 cannot be powered off or started from here.",
       upstreamTaskId: null,
     };
   }
