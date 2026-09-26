@@ -16,7 +16,7 @@ export default function SignInPage() {
   const [recover, setRecover] = useState("");
 
   useEffect(() => {
-    fetch("/api/auth")
+    fetch("/api/auth", { credentials: "include" })
       .then((res) => res.json())
       .then((data) => {
         setOwnerExists(Boolean(data.ownerExists));
@@ -29,6 +29,7 @@ export default function SignInPage() {
     setError("");
     const res = await fetch("/api/auth", {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });

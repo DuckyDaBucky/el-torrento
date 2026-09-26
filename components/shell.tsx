@@ -19,7 +19,7 @@ export function Shell({
 }) {
   const [session, setSession] = useState<Session | null>(null);
   useEffect(() => {
-    fetch("/api/auth")
+    fetch("/api/auth", { credentials: "include" })
       .then((res) => res.json())
       .then(setSession)
       .catch(() => setSession(null));
@@ -55,6 +55,7 @@ export function Shell({
                 event.preventDefault();
                 await fetch("/api/auth", {
                   method: "POST",
+                  credentials: "include",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ action: "logout" }),
                 });

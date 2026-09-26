@@ -24,10 +24,10 @@ export default function WatchHome() {
   const [error, setError] = useState("");
 
   async function load() {
-    const auth = await fetch("/api/auth").then((res) => res.json());
+    const auth = await fetch("/api/auth", { credentials: "include" }).then((res) => res.json());
     setSignedIn(Boolean(auth.user));
     if (!auth.user) return;
-    const res = await fetch("/api/media");
+    const res = await fetch("/api/media", { credentials: "include" });
     if (!res.ok) return;
     const data = await res.json();
     setMedia(data.media ?? []);
@@ -85,6 +85,7 @@ export default function WatchHome() {
               setError("");
               const res = await fetch("/api/media", {
                 method: "POST",
+                credentials: "include",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ title }),
               });

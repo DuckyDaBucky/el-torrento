@@ -24,7 +24,7 @@ export function Player({ id }: { id: string }) {
   const [hint, setHint] = useState("");
 
   async function refresh() {
-    const res = await fetch(`/api/media/${id}`);
+    const res = await fetch(`/api/media/${id}`, { credentials: "include" });
     if (!res.ok) return;
     setManifest(await res.json());
   }
@@ -59,6 +59,7 @@ export function Player({ id }: { id: string }) {
     setHint("");
     const res = await fetch(`/api/media/${id}/play`, {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile: nextProfile === "auto" ? "original" : nextProfile }),
     });
@@ -101,6 +102,7 @@ export function Player({ id }: { id: string }) {
             const seconds = video.currentTime;
             const res = await fetch(`/api/media/${id}/seek`, {
               method: "POST",
+              credentials: "include",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 seconds,
