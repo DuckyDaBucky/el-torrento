@@ -6,7 +6,7 @@ import { Shell } from "@/components/shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-export default function SignInPage() {
+export function DevSignIn() {
   const router = useRouter();
   const [ownerExists, setOwnerExists] = useState(false);
   const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
@@ -48,8 +48,7 @@ export default function SignInPage() {
         <div>
           <h1 className="text-3xl">Sign in</h1>
           <p className="mt-2 text-sm text-[var(--muted)]">
-            The owner is the Google account for hasnainmn7@gmail.com, bound once to a Clerk user id.
-            Without Clerk keys, the button below creates that binding locally and shows a recovery code.
+            Dev mode: no Clerk keys. The button below binds the bootstrap owner locally and shows a recovery code.
             Typing the email later does not sign you in.
           </p>
         </div>
@@ -57,7 +56,9 @@ export default function SignInPage() {
         {!ownerExists ? (
           <Button onClick={() => post({ action: "bootstrap" })}>Create owner access</Button>
         ) : (
-          <p className="text-sm text-[var(--muted)]">Owner access already exists. Use the recovery code if the session is gone.</p>
+          <p className="text-sm text-[var(--muted)]">
+            Owner access already exists. Use the recovery code if the session is gone.
+          </p>
         )}
 
         {recoveryCode ? (
