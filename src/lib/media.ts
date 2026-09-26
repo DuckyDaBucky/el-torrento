@@ -71,6 +71,7 @@ export function manifestFor(user: UserRow, id: string) {
     availablePieces: row.available_pieces,
     pieceCount: row.piece_count,
     profiles: offeredProfiles(facts),
+    sourceFacts: facts,
     badge: deliveryBadge(facts, (playback?.profile as ProfileId) ?? "original"),
     generation: playback?.generation ?? 0,
     position: playback?.position_sec ?? 0,
@@ -345,7 +346,8 @@ export function saveSeerrRequest(id: string, externalId: string | null, error: s
 export function listRequests() {
   return getDb()
     .prepare(
-      `SELECT r.id, r.title, r.state, r.created_at as createdAt, r.seerr_request_id as seerrRequestId, u.email
+      `SELECT r.id, r.title, r.state, r.created_at as createdAt, r.seerr_request_id as seerrRequestId,
+              r.tmdb_id as tmdbId, r.media_type as mediaType, u.email
        FROM media_requests r JOIN users u ON u.id = r.user_id
        ORDER BY r.created_at DESC`,
     )
@@ -355,6 +357,8 @@ export function listRequests() {
     state: string;
     createdAt: string;
     seerrRequestId: string | null;
+    tmdbId: string | null;
+    mediaType: string | null;
     email: string;
   }[];
 }

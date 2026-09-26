@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Hls from "hls.js";
 import { keptPosition } from "@/src/lib/pieces";
+import { deliveryBadge, type ProfileId, type SourceFacts } from "@/src/lib/quality";
 import { Shell } from "@/components/shell";
 import { Button } from "@/components/ui/button";
 
@@ -11,8 +12,11 @@ type Manifest = {
   availablePieces: number;
   pieceCount: number;
   profiles: { id: string; bitrate?: string }[];
+  sourceFacts: SourceFacts;
   badge: { showSuccess: boolean; label: string; detail: string };
   position: number;
+  profile: string;
+  generation: number;
 };
 
 export function Player({ id }: { id: string }) {
@@ -32,7 +36,12 @@ export function Player({ id }: { id: string }) {
   async function refresh() {
     const res = await fetch(`/api/media/${id}`, { credentials: "include" });
     if (!res.ok) return;
-    setManifest(await res.json());
+    const data = (await res.json()) as Manifest;
+    setManifest(data);
+    if (generation === 0 && data.generation > 0) {
+      setGeneration(data.generation);
+      setProfile(data.profile);
+    }
   }
 
   useEffect(() => {
@@ -40,6 +49,12 @@ export function Player({ id }: { id: string }) {
     const timer = setInterval(() => refresh().catch(() => undefined), 2000);
     return () => clearInterval(timer);
   }, [id]);
+
+  const activeProfile = (profile as ProfileId) || "original";
+  const badge = useMemo(() => {
+    if (!manifest?.sourceFacts) return manifest?.badge ?? null;
+    return deliveryBadge(manifest.sourceFacts, activeProfile);
+  }, [manifest, activeProfile]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -90,16 +105,17 @@ export function Player({ id }: { id: string }) {
     return keptPosition(videoRef.current?.currentTime ?? 0, manifest?.position ?? 0);
   }
 
-  async function begin(nextProfile: string) {
+  async function changePlayback(nextProfile: string, position: number) {
     setError("");
-    const position = currentPosition();
     pendingTime.current = position;
-    const sent = nextProfile === "auto" ? "original" : nextProfile;
-    const res = await fetch(`/api/media/${id}/play`, {
+    const res = await fetch(`/api/media/${id}/playback`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile: sent, positionSeconds: position }),
+      body: JSON.stringify({
+        quality: nextProfile,
+        positionSeconds: position,
+      }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -110,6 +126,10 @@ export function Player({ id }: { id: string }) {
     setGeneration(data.generation);
   }
 
+  async function begin(nextProfile: string) {
+    await changePlayback(nextProfile, currentPosition());
+  }
+
   return (
     <Shell tone="watch">
       <div className="mx-auto max-w-4xl space-y-4">
@@ -117,13 +137,14 @@ export function Player({ id }: { id: string }) {
           <div>
             <h1 className="text-3xl">{manifest?.title ?? "Player"}</h1>
             <p className="text-sm text-[var(--muted)]">
-              {manifest ? `${manifest.availablePieces}/${manifest.pieceCount} pieces verified` : "Loading"}
+              {manifest ? `${manifest.availablePieces}/${manifest.pieceCount} verified` : "Loading"}
+              {activeProfile ? ` · ${activeProfile === "auto" ? "auto" : activeProfile}` : ""}
             </p>
           </div>
-          {manifest ? (
-            <p className={manifest.badge.showSuccess ? "text-sm text-[var(--sand)]" : "text-sm text-amber-200"}>
-              {manifest.badge.label}
-              <span className="mt-1 block text-[var(--muted)]">{manifest.badge.detail}</span>
+          {badge ? (
+            <p className={badge.showSuccess ? "text-sm text-[var(--sand)]" : "text-sm text-amber-200"}>
+              {badge.label}
+              <span className="mt-1 block text-[var(--muted)]">{badge.detail}</span>
             </p>
           ) : null}
         </div>
@@ -138,22 +159,7 @@ export function Player({ id }: { id: string }) {
             const video = videoRef.current;
             if (!video || ignoreSeek.current || !generation) return;
             const seconds = video.currentTime;
-            const res = await fetch(`/api/media/${id}/seek`, {
-              method: "POST",
-              credentials: "include",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                seconds,
-                profile: profile === "auto" ? "original" : profile,
-              }),
-            });
-            const data = await res.json();
-            if (!res.ok) {
-              setError(data.error ?? "Seek failed.");
-              return;
-            }
-            pendingTime.current = seconds;
-            setGeneration(data.generation);
+            await changePlayback(profile === "auto" ? "auto" : profile, seconds);
           }}
           onWaiting={() => {
             if (profile !== "auto" || autoDropped.current) {
