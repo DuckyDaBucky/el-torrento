@@ -1,5 +1,7 @@
 import type { UserRow } from "./db";
-import { saveServiceLink } from "./db";
+import { getServiceLink, saveServiceLink } from "./db";
+import { createRequest, findRequestByTmdb, saveSeerrRequest } from "./media";
+import { FAMILY_COPY } from "./resolver";
 
 type FetchLike = typeof fetch;
 
@@ -17,39 +19,50 @@ export async function syncJellyfin(input: {
   const disabled = input.user.status === "suspended" || input.user.status === "revoked";
   const root = input.baseUrl.replace(/\/$/, "");
   const headers = { "X-Emby-Token": input.apiKey, "Content-Type": "application/json" };
-  const policy = { IsDisabled: disabled };
   try {
-    const existingLink = input.user.id;
+    const storedId = getServiceLink(input.user.id, "jellyfin");
     const prior = await fetchImpl(`${root}/Users`, {
       headers: { "X-Emby-Token": input.apiKey },
       signal: AbortSignal.timeout(5000),
     }).catch(() => null);
-    let externalId: string | null = null;
+    let externalId: string | null = storedId;
     if (prior?.ok) {
       const users = (await prior.json()) as { Id?: string; Name?: string }[];
-      const match = users.find((item) => item.Name === existingLink);
+      const match = users.find((item) => (storedId && item.Id === storedId) || item.Name === input.user.id);
       externalId = match?.Id ?? null;
     }
-    const response = externalId
-      ? await fetchImpl(`${root}/Users/${externalId}`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ Name: input.user.id, Policy: policy }),
-          signal: AbortSignal.timeout(5000),
-        })
-      : await fetchImpl(`${root}/Users/New`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ Name: input.user.id, Policy: policy }),
-          signal: AbortSignal.timeout(5000),
-        });
+    if (externalId) {
+      const policyResponse = await fetchImpl(`${root}/Users/${externalId}/Policy`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ IsDisabled: disabled }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!policyResponse.ok) {
+        const error = `Jellyfin HTTP ${policyResponse.status}`;
+        saveServiceLink(input.user.id, "jellyfin", externalId, error);
+        return { ok: false, error };
+      }
+      saveServiceLink(input.user.id, "jellyfin", externalId, null);
+      return { ok: true, externalId };
+    }
+    if (disabled) {
+      saveServiceLink(input.user.id, "jellyfin", null, null);
+      return { ok: true };
+    }
+    const response = await fetchImpl(`${root}/Users/New`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ Name: input.user.id, Policy: { IsDisabled: false } }),
+      signal: AbortSignal.timeout(5000),
+    });
     if (!response.ok) {
       const error = `Jellyfin HTTP ${response.status}`;
-      saveServiceLink(input.user.id, "jellyfin", externalId, error);
+      saveServiceLink(input.user.id, "jellyfin", null, error);
       return { ok: false, error };
     }
     const body = (await response.json()) as { Id?: string };
-    externalId = body.Id ?? externalId;
+    externalId = body.Id ?? null;
     saveServiceLink(input.user.id, "jellyfin", externalId, null);
     return { ok: true, externalId: externalId ?? undefined };
   } catch (error) {
@@ -164,17 +177,41 @@ export async function listJellyfinLibrary(input: {
   }
 }
 
-type SeerrHit = { id?: number; mediaType?: string; title?: string };
+type SeerrHit = { id?: number; mediaType?: string; title?: string; season?: number | null };
 
-/** Search Seerr and create a request. This is the Jellyseerr /api/v1/request contract. */
+async function lookupSeerrRequestId(
+  fetchImpl: FetchLike,
+  root: string,
+  apiKey: string,
+  tmdbId: string,
+  mediaType: "movie" | "tv",
+): Promise<string | null> {
+  const path = mediaType === "tv" ? "tv" : "movie";
+  const response = await fetchImpl(`${root}/api/v1/${path}/${encodeURIComponent(tmdbId)}`, {
+    headers: { "X-Api-Key": apiKey, Accept: "application/json" },
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) return null;
+  const body = (await response.json()) as {
+    mediaInfo?: { requests?: { id?: number }[] };
+    requests?: { id?: number }[];
+  };
+  const fromMedia = body.mediaInfo?.requests?.find((item) => item.id != null)?.id;
+  const fromTop = body.requests?.find((item) => item.id != null)?.id;
+  const id = fromMedia ?? fromTop;
+  return id != null ? String(id) : null;
+}
+
+/** Create a Seerr request for a TMDB id. A repeat call reuses the existing request. */
 export async function requestTitleInSeerr(input: {
   title: string;
   tmdbId?: string;
   mediaType?: "movie" | "tv";
+  season?: number | null;
   baseUrl: string | undefined;
   apiKey: string | undefined;
   fetchImpl?: FetchLike;
-}): Promise<{ ok: boolean; error?: string; externalId?: string; mediaType?: string }> {
+}): Promise<{ ok: boolean; error?: string; externalId?: string; mediaType?: string; reused?: boolean }> {
   if (!input.baseUrl || !input.apiKey) {
     return { ok: false, error: "Seerr is not configured." };
   }
@@ -183,7 +220,13 @@ export async function requestTitleInSeerr(input: {
   try {
     let hit: SeerrHit | undefined;
     if (input.tmdbId && input.mediaType) {
-      hit = { id: Number(input.tmdbId), mediaType: input.mediaType, title: input.title };
+      const mediaId = Number(input.tmdbId);
+      if (!Number.isFinite(mediaId)) return { ok: false, error: "A catalog id is required." };
+      const existing = await lookupSeerrRequestId(fetchImpl, root, input.apiKey, input.tmdbId, input.mediaType).catch(
+        () => null,
+      );
+      if (existing) return { ok: true, externalId: existing, mediaType: input.mediaType, reused: true };
+      hit = { id: mediaId, mediaType: input.mediaType, title: input.title, season: input.season };
     } else {
       const search = await fetchImpl(`${root}/api/v1/search?query=${encodeURIComponent(input.title)}&page=1`, {
         headers: { "X-Api-Key": input.apiKey, Accept: "application/json" },
@@ -194,17 +237,79 @@ export async function requestTitleInSeerr(input: {
       hit = (found.results ?? []).find((item) => item.id != null && item.mediaType);
     }
     if (!hit?.id || !hit.mediaType) return { ok: false, error: "Seerr has no match for that title." };
+    const payload: { mediaType: string; mediaId: number; seasons?: "all" | number[] } = {
+      mediaType: hit.mediaType,
+      mediaId: hit.id,
+    };
+    if (hit.mediaType === "tv") payload.seasons = hit.season != null ? [hit.season] : "all";
     const created = await fetchImpl(`${root}/api/v1/request`, {
       method: "POST",
       headers: { "X-Api-Key": input.apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ mediaType: hit.mediaType, mediaId: hit.id }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(5000),
     });
+    if (created.status === 409 && input.tmdbId && input.mediaType) {
+      const existing = await lookupSeerrRequestId(fetchImpl, root, input.apiKey, input.tmdbId, input.mediaType).catch(
+        () => null,
+      );
+      if (existing) return { ok: true, externalId: existing, mediaType: input.mediaType, reused: true };
+    }
     if (!created.ok) return { ok: false, error: `Seerr request HTTP ${created.status}` };
     const body = (await created.json()) as { id?: number };
     if (body.id == null) return { ok: false, error: "Seerr did not return a request id." };
-    return { ok: true, externalId: String(body.id), mediaType: hit.mediaType };
+    return { ok: true, externalId: String(body.id), mediaType: hit.mediaType, reused: false };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Seerr request failed." };
   }
+}
+
+export async function placeTitleRequest(input: {
+  user: UserRow;
+  title: string;
+  tmdbId?: string;
+  mediaType?: "movie" | "tv";
+  baseUrl: string | undefined;
+  apiKey: string | undefined;
+  fetchImpl?: FetchLike;
+}): Promise<{
+  id: string;
+  reused: boolean;
+  message: string;
+  seerr: { ok: boolean; externalId?: string; reused?: boolean };
+}> {
+  if (!input.tmdbId || (input.mediaType !== "movie" && input.mediaType !== "tv")) {
+    throw new Error("Choose a title from the list.");
+  }
+  const existing = findRequestByTmdb(input.user.id, input.tmdbId, input.mediaType);
+  if (existing?.seerrRequestId) {
+    return {
+      id: existing.id,
+      reused: true,
+      message: `"${input.title}" is already on the household list.`,
+      seerr: { ok: true, externalId: existing.seerrRequestId, reused: true },
+    };
+  }
+  const created = existing ?? createRequest(input.user, input.title, { tmdbId: input.tmdbId, mediaType: input.mediaType });
+  const seerr = await requestTitleInSeerr({
+    title: input.title,
+    tmdbId: input.tmdbId,
+    mediaType: input.mediaType,
+    baseUrl: input.baseUrl,
+    apiKey: input.apiKey,
+    fetchImpl: input.fetchImpl,
+  });
+  if (seerr.externalId) saveSeerrRequest(created.id, seerr.externalId, null);
+  const reused = Boolean(existing) || Boolean(seerr.reused);
+  let message: string = FAMILY_COPY.failure;
+  if (seerr.ok && reused) message = `"${input.title}" is already on the household list.`;
+  else if (seerr.ok) message = `"${input.title}" was sent to the household list.`;
+  else if (seerr.error === "Seerr is not configured.") {
+    message = `"${input.title}" was saved here. It will be requested when the house list is connected.`;
+  }
+  return {
+    id: created.id,
+    reused,
+    message,
+    seerr: { ok: seerr.ok, externalId: seerr.externalId, reused: seerr.reused },
+  };
 }

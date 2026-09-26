@@ -10,10 +10,21 @@ import { Input } from "@/components/ui/input";
 type LocalMedia = {
   id: string;
   title: string;
-  height: number;
-  hdr: string | null;
-  audio_codec: string;
   request_state: string;
+  available_pieces: number;
+  piece_count: number;
+};
+
+type FamilyCopy = {
+  buffering: string;
+  unavailable: string;
+  failure: string;
+};
+
+const FAMILY_COPY: FamilyCopy = {
+  buffering: "Still loading. It will play when enough of the video is ready.",
+  unavailable: "This isn't available to watch right now.",
+  failure: "This didn't start. Try again in a little while, or request it.",
 };
 
 type CatalogCard = {
@@ -23,10 +34,11 @@ type CatalogCard = {
   year: string | null;
   overview: string | null;
   posterUrl: string | null;
-  playable: boolean;
-  discoverable: boolean;
+  action: "library" | "watch-now" | "request";
+  playUrl: string | null;
   mediaId: string | null;
   requestState: string | null;
+  notice: "buffering" | "unavailable" | "failure" | null;
 };
 
 type JellyfinItem = {
@@ -38,24 +50,26 @@ type JellyfinItem = {
   playUrl: string | null;
 };
 
-function requestLabel(state: string | null): string | null {
+function requestLabel(state: string | null, copy: FamilyCopy): string | null {
   if (!state) return null;
   if (state === "available") return "Ready";
   if (state === "requested" || state === "resolving") return "Requested";
-  if (state === "failed") return "Unavailable";
-  return state.replace(/_/g, " ");
+  if (state === "failed") return copy.unavailable;
+  if (state === "downloading" || state === "importing") return copy.buffering;
+  return copy.unavailable;
 }
 
 export default function WatchHome() {
   const [signedIn, setSignedIn] = useState(false);
   const [library, setLibrary] = useState<LocalMedia[]>([]);
   const [catalog, setCatalog] = useState<CatalogCard[]>([]);
-  const [jellyfin, setJellyfin] = useState<{ items: JellyfinItem[]; limitation?: string } | null>(null);
+  const [jellyfin, setJellyfin] = useState<{ items: JellyfinItem[] } | null>(null);
   const [query, setQuery] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [catalogError, setCatalogError] = useState("");
   const [message, setMessage] = useState("");
+  const [copy, setCopy] = useState<FamilyCopy>(FAMILY_COPY);
   const [requesting, setRequesting] = useState<string | null>(null);
 
   const loadCatalog = useCallback(async (q: string) => {
@@ -65,9 +79,12 @@ export default function WatchHome() {
     const data = await res.json();
     setLoadingCatalog(false);
     if (!res.ok) {
-      setCatalogError(data.error ?? "Could not load the catalog.");
+      setCatalogError("Search isn't available right now.");
       setCatalog([]);
       return;
+    }
+    if (data.familyCopy?.buffering && data.familyCopy?.unavailable && data.familyCopy?.failure) {
+      setCopy(data.familyCopy);
     }
     setCatalog(data.results ?? []);
   }, []);
@@ -77,17 +94,19 @@ export default function WatchHome() {
     setSignedIn(Boolean(auth.user));
     if (!auth.user) return;
     const res = await fetch("/api/media", { credentials: "include" });
-    if (!res.ok) return;
-    const data = await res.json();
-    const ready = (data.media ?? []).filter((item: LocalMedia) => item.request_state === "available");
-    setLibrary(ready);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.familyCopy?.buffering) setCopy(data.familyCopy);
+      const ready = (data.media ?? []).filter((item: LocalMedia) => item.request_state === "available");
+      setLibrary(ready);
+    }
     await loadCatalog("");
     const jf = await fetch("/api/catalog/jellyfin", { credentials: "include" }).then((r) => r.json());
-    if (jf.items?.length) setJellyfin({ items: jf.items, limitation: jf.limitation });
+    if (jf.items?.length) setJellyfin({ items: jf.items });
   }
 
   useEffect(() => {
-    load().catch(() => setCatalogError("Could not load the library."));
+    load().catch(() => setCatalogError("Search isn't available right now."));
   }, [loadCatalog]);
 
   async function requestTitle(card: CatalogCard) {
@@ -101,23 +120,35 @@ export default function WatchHome() {
         title: card.title,
         tmdbId: String(card.id),
         mediaType: card.mediaType,
+        year: card.year,
       }),
     });
     const data = await res.json();
     setRequesting(null);
-    if (!res.ok) {
-      setMessage(data.error ?? "Could not request that title.");
-      return;
-    }
-    setMessage(
-      data.seerr?.ok
-        ? `"${card.title}" was sent to the household request list.`
-        : `"${card.title}" was saved. The request desk will pick it up when connected.`,
-    );
+    setMessage(data.message ?? (res.ok ? `"${card.title}" was sent to the household list.` : copy.failure));
     await loadCatalog(query);
   }
 
-  const readyIds = new Set(library.map((item) => item.id));
+  async function watchNow(card: CatalogCard) {
+    setMessage("");
+    setRequesting(`${card.mediaType}-${card.id}`);
+    const res = await fetch("/api/media", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        intent: "watch-now",
+        title: card.title,
+        tmdbId: String(card.id),
+        mediaType: card.mediaType,
+        year: card.year,
+        language: "en",
+      }),
+    });
+    const data = await res.json();
+    setRequesting(null);
+    setMessage(data.message ?? copy.failure);
+  }
 
   return (
     <Shell tone="watch">
@@ -125,7 +156,7 @@ export default function WatchHome() {
         <p className="text-xs uppercase tracking-[0.22em] text-[var(--sand)]">Family watch</p>
         <h1 className="mt-2 text-4xl font-semibold tracking-tight md:text-6xl">Pick something tonight</h1>
         <p className="mt-4 max-w-xl text-[var(--muted)]">
-          Browse posters, search by name, watch what is already on the shelf, or request a new title for the household.
+          Search by name, play what is already in the house, or ask for a title to be added.
         </p>
       </section>
 
@@ -140,7 +171,7 @@ export default function WatchHome() {
             onSubmit={(event) => {
               event.preventDefault();
               setQuery(searchInput.trim());
-              loadCatalog(searchInput.trim()).catch(() => setCatalogError("Search failed."));
+              loadCatalog(searchInput.trim()).catch(() => setCatalogError("Search isn't available right now."));
             }}
           >
             <Input
@@ -148,35 +179,38 @@ export default function WatchHome() {
               onChange={(event) => setSearchInput(event.target.value)}
               placeholder="Search movies and shows"
             />
-            <Button type="submit" disabled={loadingCatalog}>{loadingCatalog ? "Searching…" : "Search"}</Button>
+            <Button type="submit" disabled={loadingCatalog}>
+              {loadingCatalog ? "Searching…" : "Search"}
+            </Button>
           </form>
 
           {library.length > 0 ? (
             <section>
               <div className="mb-4 flex items-baseline justify-between gap-3">
                 <h2 className="text-2xl font-medium">Ready to watch</h2>
-                <p className="text-sm text-[var(--muted)]">Starts in this player</p>
+                <p className="text-sm text-[var(--muted)]">Starts here</p>
               </div>
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                {library.map((item) => (
-                  <Link
-                    key={item.id}
-                    href={`/watch/${item.id}`}
-                    className="group overflow-hidden rounded-xl border border-white/10 bg-[var(--card)] transition hover:border-[var(--sand)]/40"
-                  >
-                    <div className="relative flex aspect-[2/3] items-end bg-[radial-gradient(circle_at_30%_20%,#e4b07a,transparent_40%),linear-gradient(160deg,#1b2430,#0c0d10)] p-4">
-                      <div>
-                        <p className="text-lg font-medium leading-snug">{item.title}</p>
-                        <p className="mt-1 text-xs text-white/70">
-                          {item.height}p · {item.hdr ?? "SDR"} · {item.audio_codec}
-                        </p>
+                {library.map((item) => {
+                  const stillLoading = item.piece_count > 0 && item.available_pieces < item.piece_count;
+                  return (
+                    <Link
+                      key={item.id}
+                      href={`/watch/${item.id}`}
+                      className="group overflow-hidden rounded-xl border border-white/10 bg-[var(--card)] transition hover:border-[var(--sand)]/40"
+                    >
+                      <div className="relative flex aspect-[2/3] items-end bg-[radial-gradient(circle_at_30%_20%,#e4b07a,transparent_40%),linear-gradient(160deg,#1b2430,#0c0d10)] p-4">
+                        <div>
+                          <p className="text-lg font-medium leading-snug">{item.title}</p>
+                          {stillLoading ? <p className="mt-2 text-xs text-white/80">{copy.buffering}</p> : null}
+                        </div>
+                        <span className="absolute right-3 top-3 rounded-full bg-[var(--sand)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-black">
+                          Watch now
+                        </span>
                       </div>
-                      <span className="absolute right-3 top-3 rounded-full bg-[var(--sand)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-black">
-                        Watch
-                      </span>
-                    </div>
-                  </Link>
-                ))}
+                    </Link>
+                  );
+                })}
               </div>
             </section>
           ) : null}
@@ -184,77 +218,79 @@ export default function WatchHome() {
           <section>
             <div className="mb-4 flex flex-wrap items-baseline justify-between gap-3">
               <h2 className="text-2xl font-medium">{query ? `Results for “${query}”` : "Discover"}</h2>
-              <p className="text-sm text-[var(--muted)]">Posters from TMDB</p>
+              <p className="text-sm text-[var(--muted)]">Names and posters only. Play comes from the house library.</p>
             </div>
             {catalogError ? <p className="text-sm text-amber-200">{catalogError}</p> : null}
             <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-              {catalog
-                .filter((card) => !card.mediaId || !readyIds.has(card.mediaId))
-                .map((card) => {
-                  const pending = requestLabel(card.requestState);
-                  return (
-                    <article
-                      key={`${card.mediaType}-${card.id}`}
-                      className="flex flex-col overflow-hidden rounded-xl border border-white/10 bg-[var(--card)]"
-                    >
-                      <div className="relative aspect-[2/3] bg-[#0c0d10]">
-                        {card.posterUrl ? (
-                          <Image
-                            src={card.posterUrl}
-                            alt=""
-                            fill
-                            sizes="(max-width: 768px) 50vw, 16vw"
-                            className="object-cover"
-                          />
+              {catalog.map((card) => {
+                const pending = requestLabel(card.requestState, copy);
+                const key = `${card.mediaType}-${card.id}`;
+                const busy = requesting === key;
+                return (
+                  <article key={key} className="flex flex-col overflow-hidden rounded-xl border border-white/10 bg-[var(--card)]">
+                    <div className="relative aspect-[2/3] bg-[#0c0d10]">
+                      {card.posterUrl ? (
+                        <Image src={card.posterUrl} alt="" fill sizes="(max-width: 768px) 50vw, 16vw" className="object-cover" />
+                      ) : (
+                        <div className="flex h-full items-center justify-center p-4 text-center text-sm text-[var(--muted)]">
+                          {card.title}
+                        </div>
+                      )}
+                      {card.action === "library" ? (
+                        <span className="absolute left-2 top-2 rounded-full bg-emerald-500/90 px-2 py-0.5 text-[10px] font-medium uppercase text-black">
+                          In the house
+                        </span>
+                      ) : card.notice === "unavailable" ? (
+                        <span className="absolute left-2 top-2 rounded-full bg-white/15 px-2 py-0.5 text-[10px] font-medium uppercase">
+                          Unavailable
+                        </span>
+                      ) : pending ? (
+                        <span className="absolute left-2 top-2 rounded-full bg-white/15 px-2 py-0.5 text-[10px] font-medium uppercase">
+                          {pending === copy.unavailable ? "Unavailable" : pending === copy.buffering ? "Loading" : pending}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-1 flex-col gap-2 p-3">
+                      <div>
+                        <h3 className="text-sm font-medium leading-snug">{card.title}</h3>
+                        <p className="text-xs text-[var(--muted)]">
+                          {card.year ?? "—"} · {card.mediaType === "tv" ? "Series" : "Movie"}
+                        </p>
+                      </div>
+                      {card.overview ? <p className="line-clamp-3 text-xs text-[var(--muted)]">{card.overview}</p> : null}
+                      {card.notice === "unavailable" ? <p className="text-xs text-amber-100/90">{copy.unavailable}</p> : null}
+                      <div className="mt-auto flex gap-2 pt-2">
+                        {card.action === "library" && card.playUrl ? (
+                          <a href={card.playUrl} target="_blank" rel="noreferrer" className="flex-1">
+                            <Button className="w-full py-1.5 text-xs">Play</Button>
+                          </a>
+                        ) : card.action === "watch-now" && card.mediaId ? (
+                          <Link href={`/watch/${card.mediaId}`} className="flex-1">
+                            <Button className="w-full py-1.5 text-xs">Watch now</Button>
+                          </Link>
+                        ) : card.action === "watch-now" ? (
+                          <Button className="w-full flex-1 py-1.5 text-xs" disabled={busy} onClick={() => watchNow(card)}>
+                            {busy ? "Starting…" : "Watch now"}
+                          </Button>
+                        ) : pending && card.requestState !== "failed" ? (
+                          <Button className="w-full flex-1 py-1.5 text-xs" variant="ghost" disabled>
+                            Requested
+                          </Button>
                         ) : (
-                          <div className="flex h-full items-center justify-center p-4 text-center text-sm text-[var(--muted)]">
-                            {card.title}
-                          </div>
+                          <Button
+                            className="w-full flex-1 py-1.5 text-xs"
+                            variant="ghost"
+                            disabled={busy}
+                            onClick={() => requestTitle(card)}
+                          >
+                            {busy ? "Sending…" : "Request"}
+                          </Button>
                         )}
-                        {card.playable && card.mediaId ? (
-                          <span className="absolute left-2 top-2 rounded-full bg-emerald-500/90 px-2 py-0.5 text-[10px] font-medium uppercase text-black">
-                            On shelf
-                          </span>
-                        ) : pending ? (
-                          <span className="absolute left-2 top-2 rounded-full bg-white/15 px-2 py-0.5 text-[10px] font-medium uppercase">
-                            {pending}
-                          </span>
-                        ) : null}
                       </div>
-                      <div className="flex flex-1 flex-col gap-2 p-3">
-                        <div>
-                          <h3 className="text-sm font-medium leading-snug">{card.title}</h3>
-                          <p className="text-xs text-[var(--muted)]">
-                            {card.year ?? "—"} · {card.mediaType === "tv" ? "Series" : "Movie"}
-                          </p>
-                        </div>
-                        {card.overview ? (
-                          <p className="line-clamp-3 text-xs text-[var(--muted)]">{card.overview}</p>
-                        ) : null}
-                        <div className="mt-auto flex gap-2 pt-2">
-                          {card.playable && card.mediaId ? (
-                            <Link href={`/watch/${card.mediaId}`} className="flex-1">
-                              <Button className="w-full py-1.5 text-xs">Watch</Button>
-                            </Link>
-                          ) : pending ? (
-                            <Button className="w-full flex-1 py-1.5 text-xs" variant="ghost" disabled>
-                              Requested
-                            </Button>
-                          ) : (
-                            <Button
-                              className="w-full flex-1 py-1.5 text-xs"
-                              variant="ghost"
-                              disabled={requesting === `${card.mediaType}-${card.id}`}
-                              onClick={() => requestTitle(card)}
-                            >
-                              {requesting === `${card.mediaType}-${card.id}` ? "Sending…" : "Request"}
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
+                    </div>
+                  </article>
+                );
+              })}
             </div>
             {!loadingCatalog && catalog.length === 0 && !catalogError ? (
               <p className="text-[var(--muted)]">No titles to show yet. Try another search.</p>
@@ -265,16 +301,11 @@ export default function WatchHome() {
             <section>
               <div className="mb-2 flex flex-wrap items-baseline justify-between gap-3">
                 <h2 className="text-2xl font-medium">Household library</h2>
-                <a
-                  href="https://media.hasnain.us"
-                  className="text-sm text-[var(--sand)] underline-offset-4 hover:underline"
-                >
-                  Open Jellyfin
+                <a href="https://media.hasnain.us" className="text-sm text-[var(--sand)] underline-offset-4 hover:underline">
+                  Open the library
                 </a>
               </div>
-              {jellyfin.limitation ? (
-                <p className="mb-4 max-w-2xl text-sm text-[var(--muted)]">{jellyfin.limitation}</p>
-              ) : null}
+              <p className="mb-4 max-w-2xl text-sm text-[var(--muted)]">These titles are already in the house. Play opens them there.</p>
               <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
                 {jellyfin.items.map((item) => (
                   <a
@@ -286,7 +317,6 @@ export default function WatchHome() {
                   >
                     <div className="relative aspect-[2/3] bg-[#0c0d10]">
                       {item.imageUrl ? (
-                        // Jellyfin images are same-origin to the server URL; use img for flexibility.
                         <img src={item.imageUrl} alt="" className="h-full w-full object-cover" />
                       ) : (
                         <div className="flex h-full items-center justify-center p-3 text-center text-xs text-[var(--muted)]">
@@ -296,7 +326,9 @@ export default function WatchHome() {
                     </div>
                     <div className="p-3">
                       <p className="text-sm font-medium leading-snug">{item.title}</p>
-                      <p className="text-xs text-[var(--muted)]">{item.year ?? "—"} · {item.type}</p>
+                      <p className="text-xs text-[var(--muted)]">
+                        {item.year ?? "—"} · Play
+                      </p>
                     </div>
                   </a>
                 ))}

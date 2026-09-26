@@ -310,6 +310,24 @@ export async function addTorrent(
   return row;
 }
 
+export function findRequestByTmdb(
+  userId: string,
+  tmdbId: string,
+  mediaType: string,
+): { id: string; state: string; seerrRequestId: string | null } | undefined {
+  return getDb()
+    .prepare(
+      `SELECT id, state, seerr_request_id as seerrRequestId
+       FROM media_requests
+       WHERE user_id = ? AND tmdb_id = ? AND media_type = ?
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .get(userId, tmdbId, mediaType) as
+    | { id: string; state: string; seerrRequestId: string | null }
+    | undefined;
+}
+
 export function createRequest(
   user: UserRow,
   title: string,
