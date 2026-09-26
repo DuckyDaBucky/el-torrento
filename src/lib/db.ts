@@ -34,26 +34,6 @@ export type PublicUser = {
 };
 
 let db: DatabaseSync | null = null;
-let demoInitStarted = false;
-
-function scheduleDemoMedia(): void {
-  if (demoInitStarted) return;
-  if (process.env.ELTORRENTO_DB === ":memory:") return;
-  if (process.env.NODE_ENV === "test" || process.env.ELTORRENTO_DEMO === "0") return;
-  demoInitStarted = true;
-  void import("./media")
-    .then(async (media) => {
-      await media.ensureDemoFile().catch(() => undefined);
-      setInterval(() => {
-        try {
-          media.advanceDemoPieces();
-        } catch {
-          /* db not ready */
-        }
-      }, 2000);
-    })
-    .catch(() => undefined);
-}
 
 export function dbPath(): string {
   return process.env.ELTORRENTO_DB ?? path.join(process.cwd(), "data", "app.sqlite");
@@ -151,7 +131,9 @@ export function getDb(): DatabaseSync {
       created_at TEXT NOT NULL
     );
   `);
-  scheduleDemoMedia();
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    void import("./demo-bootstrap").then((m) => m.ensureDemoRuntime());
+  }
   return db;
 }
 

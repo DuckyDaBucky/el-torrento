@@ -30,33 +30,37 @@ function resolveAuth(identity: Identity, inviteCode?: string): AuthResult {
   return bootstrapOwner(identity);
 }
 
-async function syncFromClerk(req: Request, inviteCode?: string) {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: "Clerk session was not accepted." }, { status: 401 });
-  }
-  const user = await currentUser();
-  if (!user) {
-    return NextResponse.json({ error: "Clerk user record is missing." }, { status: 401 });
-  }
-  const identity = identityFromUser(user);
-  const result = resolveAuth(identity, inviteCode);
-  if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: result.status });
-  }
-  const redirect =
-    new URL(req.url).searchParams.get("redirect") ??
-    (result.user.role === "owner" ? "/admin" : "/");
-  const response = NextResponse.redirect(new URL(redirect, req.url));
+function attachSession(response: NextResponse, result: AuthResult): NextResponse {
+  if (!result.ok) return response;
   response.headers.set("Set-Cookie", sessionSetCookie(result.sessionId));
+  if (result.recoveryCode) {
+    response.cookies.set("et_recovery_hint", "1", { httpOnly: false, path: "/", maxAge: 120 });
+  }
   return response;
 }
 
 export async function GET(req: Request) {
   if (!process.env.CLERK_SECRET_KEY) {
-    return NextResponse.json({ error: "Clerk is not configured." }, { status: 503 });
+    return NextResponse.redirect(new URL("/sign-in", req.url));
   }
-  return syncFromClerk(req);
+  const { userId } = await auth();
+  if (!userId) {
+    return NextResponse.redirect(new URL("/sign-in", req.url));
+  }
+  const user = await currentUser();
+  if (!user) {
+    return NextResponse.redirect(new URL("/sign-in", req.url));
+  }
+  const inviteCode = new URL(req.url).searchParams.get("invite") ?? "";
+  const identity = identityFromUser(user);
+  const result = resolveAuth(identity, inviteCode);
+  if (!result.ok) {
+    return NextResponse.redirect(new URL(`/sign-in?error=${encodeURIComponent(result.error)}`, req.url));
+  }
+  const redirectParam = new URL(req.url).searchParams.get("redirect");
+  const dest = redirectParam ?? (result.user.role === "owner" ? "/admin" : "/");
+  const response = NextResponse.redirect(new URL(dest, req.url));
+  return attachSession(response, result);
 }
 
 export async function POST(req: Request) {
@@ -81,6 +85,5 @@ export async function POST(req: Request) {
     user: { id: result.user.id, email: result.user.email, role: result.user.role, status: result.user.status },
     recoveryCode: result.recoveryCode ?? null,
   });
-  response.headers.set("Set-Cookie", sessionSetCookie(result.sessionId));
-  return response;
+  return attachSession(response, result);
 }

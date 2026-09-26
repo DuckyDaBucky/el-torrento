@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { AppClerkProvider } from "@/components/clerk-provider";
+import { ClerkShell } from "@/components/clerk-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -11,7 +11,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className="antialiased">
-        <AppClerkProvider>{children}</AppClerkProvider>
+        <ClerkShell>{children}</ClerkShell>
       </body>
     </html>
   );

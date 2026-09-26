@@ -1,46 +1,46 @@
-# Verify checklist
+# Verification checklist
 
 Run before promoting a build to the homelab apps guest.
 
-## Automated (repo root `el-torrento/`)
+## Automated (`el-torrento/`)
 
 ```bash
 npm test
 npm run build
 ```
 
-Includes auth isolation, backup, quality gating (2160p), deploy validation, and cluster helpers.
+Covers auth isolation, backup, quality gating (2160p), deploy validation, piece map, and cluster helpers.
 
-## Identity
+## Auth
 
-- [ ] With Clerk keys: Google sign-in at `/sign-in`, redirect through `/api/auth/clerk-sync`, `et_session` cookie set.
-- [ ] `/admin` redirects unauthenticated Clerk users to sign-in; without `et_session`, clerk-sync runs first.
-- [ ] Without Clerk keys: dev bootstrap on `/sign-in` still binds owner locally (`ALLOW_DEV_AUTH`).
+- [ ] Owner is only the bound Clerk user id for `hasnainmn7@gmail.com`
+- [ ] With Clerk keys: sign-in at `/sign-in`, `/api/auth/clerk-sync` sets `et_session`
+- [ ] `/admin` redirects unauthenticated users; middleware sends missing `et_session` through clerk-sync
+- [ ] Without Clerk keys: dev bootstrap on `/sign-in` when `ALLOW_DEV_AUTH`
+- [ ] Viewer cannot `GET /api/admin/*` (403)
+- [ ] Revoked user cannot `GET /api/media/:id/content` (403)
+- [ ] Clerk secrets are not in the browser bundle (`NEXT_PUBLIC_*` publishable key only)
 
-## Users
+## Admin
 
-- [ ] Owner can issue invite, suspend, revoke, and sync Jellyfin/Seerr from Admin → Users.
-- [ ] Viewer cannot call `/api/admin/*` (403).
+- [ ] Overview order is 5050 · 3040a · 3040b; missing PVE token shows unknown, not fake CPU
+- [ ] Users: invite, suspend/revoke, Jellyfin/Seerr sync
+- [ ] Guest power on storage/apps/ingest; storage shutdown warns
+- [ ] Deploy preview stores digest; apply refuses digest mismatch or missing agent
+- [ ] MCP section is read-only (no apply/shell tools)
 
 ## Playback
 
-- [ ] Signal check player shows honest badge (confirmed vs transcode vs not confirmed).
-- [ ] 2160p profile hidden unless `allow4k` and encoder path are true for the title.
+- [ ] Seek past unverified pieces returns 416
+- [ ] Delivery badge does not claim HDR when path unconfirmed
+- [ ] 2160p hidden unless `allow4k` and encoder path are true
 
-## Services
+## Infra
 
-- [ ] Guest power buttons only on storage/apps/ingest; storage shutdown shows warning.
-- [ ] Deploy preview stores digest; apply refuses digest mismatch or missing agent.
-
-## MCP
-
-- [ ] Admin → MCP lists tools read-only; no apply/shell tools exposed.
+- [ ] Ingest VM cannot mount library export
+- [ ] Missing NFS refuses download path on VM disk (`resolveDownloadDir`)
+- [ ] See `el-torrento-infra/docs/storage-isolation-verified.md` and systemd mount examples
 
 ## Backup
 
-- [ ] Owner POST `/api/admin/backup` writes timestamped file under `data/backups/`.
-
-## Infra (cluster)
-
-- [ ] NFS isolation documented in `el-torrento-infra/docs/storage-isolation-verified.md`.
-- [ ] systemd mount examples present for playback and ingest guests.
+- [ ] `POST /api/admin/backup` creates a file under `data/backups/` (owner only)

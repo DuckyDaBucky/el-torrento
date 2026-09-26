@@ -11,6 +11,7 @@ import {
   acceptInvite,
   bootstrapOwner,
   createInvite,
+  readSession,
   resetDbForTests,
 } from "../src/lib/db";
 
@@ -55,6 +56,7 @@ describe("admin API auth isolation", () => {
     );
     assert.equal(viewer.ok, true);
     if (!viewer.ok) return;
+    assert.equal(readSession(viewer.sessionId)?.role, "viewer");
 
     for (const route of ADMIN_HANDLERS) {
       const res = await route.handler(
