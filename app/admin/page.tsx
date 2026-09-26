@@ -48,12 +48,19 @@ function formatMetric(value: string | null, fallback = "unknown"): string {
   return value && value.trim() ? value : fallback;
 }
 
+function isStale(checkedAt: string | null, maxAgeMs = 5 * 60 * 1000): boolean {
+  if (!checkedAt) return true;
+  const age = Date.now() - Date.parse(checkedAt);
+  return !Number.isFinite(age) || age > maxAgeMs;
+}
+
 function nodePanel(node: LiveNode, preflight?: { ram: string; root: string; thinPool: string }): string {
   const online =
     node.online === "online" ? "ONLINE" : node.online === "offline" ? "OFFLINE" : "UNKNOWN";
+  const stale = node.online !== "online" || isStale(node.checkedAt);
   const lines = [
     `${node.model} · ${node.ip}`,
-    `state: ${online}`,
+    `state: ${online}${stale ? " (stale/unknown)" : ""}`,
     `uptime: ${formatMetric(node.uptime)}`,
     `cpu: ${formatMetric(node.cpu)}`,
     `ram: ${formatMetric(node.ram, preflight?.ram ?? "unknown")}`,
