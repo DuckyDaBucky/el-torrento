@@ -3,3 +3,7 @@
 !.env.example
 *.pem
 secrets/
+node_modules/
+.next/
+data/
+tsconfig.tsbuildinfo

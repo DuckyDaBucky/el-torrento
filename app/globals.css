@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #f3efe6;
+  --muted: #b7b1a6;
+  --bg: #090a0c;
+  --card: #14161b;
+  --line: #2a2e36;
+  --sand: #e4b07a;
+  --phosphor: #c6f58a;
+  --term: #0e130d;
+  --term-line: #31462c;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
