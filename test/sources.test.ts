@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { resetDbForTests, getDb } from "../src/lib/db";
-import { listIndexerSources, setIndexerSource } from "../src/lib/sources";
+import { listIndexerSources, selectTestedIndexerIds, setIndexerSource, type IndexerSource } from "../src/lib/sources";
 
 test("indexer sources start disabled", () => {
   process.env.ELTORRENTO_DB = ":memory:";
@@ -37,4 +37,33 @@ test("cannot enable without tested flag", () => {
   assert.throws(() => setIndexerSource(owner, "1337x", { enabled: true }), /tested/);
   const enabled = setIndexerSource(owner, "1337x", { tested: true, enabled: true });
   assert.equal(enabled.enabled, true);
+});
+
+test("only tested indexers are eligible to search", () => {
+  const local: IndexerSource[] = [
+    {
+      id: "1337x",
+      label: "1337x",
+      kind: "public",
+      prowlarrDefinition: "1337x",
+      enabled: false,
+      tested: false,
+      notes: null,
+    },
+    {
+      id: "eztv",
+      label: "EZTV",
+      kind: "public",
+      prowlarrDefinition: "eztv",
+      enabled: true,
+      tested: true,
+      notes: null,
+    },
+  ];
+  const ids = selectTestedIndexerIds(local, [
+    { id: 1, name: "1337x", definitionName: "1337x" },
+    { id: 2, name: "EZTV", definitionName: "eztv" },
+    { id: 3, name: "Nyaa", definitionName: "nyaa" },
+  ]);
+  assert.deepEqual(ids, [2]);
 });

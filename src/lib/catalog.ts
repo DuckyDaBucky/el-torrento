@@ -2,6 +2,7 @@ import type { UserRow } from "./db";
 import { getDb } from "./db";
 import { listMedia } from "./media";
 import type { MediaRow } from "./media";
+import { identityFromCatalog, identityKey } from "./resolver";
 import type { TmdbHit } from "./tmdb";
 import { tmdbPosterUrl } from "./tmdb";
 
@@ -10,6 +11,18 @@ export function normalizeTitle(title: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+export function matchJellyfin<T extends { title: string; year: string | null }>(
+  hit: { title: string; year: string | null },
+  items: T[],
+): T | undefined {
+  const key = normalizeTitle(hit.title);
+  return items.find((item) => {
+    if (normalizeTitle(item.title) !== key) return false;
+    if (hit.year && item.year && hit.year !== item.year) return false;
+    return true;
+  });
 }
 
 export function matchLocalMedia(hit: TmdbHit, library: MediaRow[]): MediaRow | undefined {
@@ -24,12 +37,18 @@ export function matchLocalMedia(hit: TmdbHit, library: MediaRow[]): MediaRow | u
   });
 }
 
+export type WatchAction = "library" | "watch-now" | "request";
+
 export type CatalogCard = TmdbHit & {
   posterUrl: string | null;
+  /** True only when the household library can play it. A TMDB hit is never enough. */
   playable: boolean;
   discoverable: boolean;
   mediaId: string | null;
   requestState: string | null;
+  action: WatchAction;
+  playUrl: string | null;
+  notice: "buffering" | "unavailable" | "failure" | null;
 };
 
 function requestForTmdb(userId: string, hit: TmdbHit): { state: string } | undefined {
@@ -43,19 +62,44 @@ function requestForTmdb(userId: string, hit: TmdbHit): { state: string } | undef
   return row;
 }
 
-export function buildCatalogCards(hits: TmdbHit[], user: UserRow): CatalogCard[] {
+export function buildCatalogCards(
+  hits: TmdbHit[],
+  user: UserRow,
+  extras?: {
+    jellyfin?: { title: string; year: string | null; playUrl: string | null }[];
+    rankedKeys?: ReadonlySet<string>;
+  },
+): CatalogCard[] {
   const library = listMedia();
+  const jellyfin = extras?.jellyfin ?? [];
+  const ranked = extras?.rankedKeys ?? new Set<string>();
   return hits.map((hit) => {
     const local = matchLocalMedia(hit, library);
     const pending = requestForTmdb(user.id, hit);
-    const playable = Boolean(local);
+    const inLibrary = matchJellyfin(hit, jellyfin);
+    const rankedKey = identityKey(identityFromCatalog(hit));
+    let action: WatchAction = "request";
+    let playUrl: string | null = null;
+    let mediaId: string | null = null;
+    if (inLibrary?.playUrl) {
+      action = "library";
+      playUrl = inLibrary.playUrl;
+    } else if (local) {
+      action = "watch-now";
+      mediaId = local.id;
+    } else if (ranked.has(rankedKey)) {
+      action = "watch-now";
+    }
     return {
       ...hit,
       posterUrl: tmdbPosterUrl(hit.posterPath),
-      playable,
-      discoverable: !playable,
-      mediaId: local?.id ?? null,
+      playable: action === "library",
+      discoverable: action === "request",
+      mediaId,
       requestState: pending?.state ?? null,
+      action,
+      playUrl,
+      notice: pending?.state === "failed" ? "unavailable" : null,
     };
   });
 }

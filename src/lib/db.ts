@@ -428,6 +428,13 @@ export function saveServiceLink(
     .run(userId, service, externalId, syncError);
 }
 
+export function getServiceLink(userId: string, service: "jellyfin" | "seerr"): string | null {
+  const row = getDb()
+    .prepare("SELECT external_id FROM service_links WHERE user_id = ? AND service = ?")
+    .get(userId, service) as { external_id: string | null } | undefined;
+  return row?.external_id ?? null;
+}
+
 export function assertOwner(user: UserRow): void {
   if (user.role !== "owner" || user.status !== "active") {
     throw new Error("Owner access is required.");
