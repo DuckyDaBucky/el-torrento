@@ -1,0 +1,13 @@
+{
+  "listen": "0.0.0.0:8080",
+  "library_root": "/data/library",
+  "cache_root": "/data/stream-cache",
+  "require_auth": true,
+  "quality_profiles": [
+    { "id": "original", "mode": "direct_or_remux" },
+    { "id": "2160p", "max_height": 2160, "video_bitrate": "16000k" },
+    { "id": "1080p", "max_height": 1080, "video_bitrate": "8000k" },
+    { "id": "720p", "max_height": 720, "video_bitrate": "4000k" },
+    { "id": "480p", "max_height": 480, "video_bitrate": "1500k" }
+  ]
+}
