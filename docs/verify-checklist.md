@@ -31,7 +31,7 @@ Covers auth isolation, backup, quality gating (2160p), deploy validation, piece 
 
 ## Playback
 
-- [ ] Seek past unverified pieces returns 416
+- [ ] Seek into a not-yet-downloaded range waits, then serves verified bytes (416 only if the range is outside the file)
 - [ ] Delivery badge does not claim HDR when path unconfirmed
 - [ ] 2160p hidden unless `allow4k` and encoder path are true
 

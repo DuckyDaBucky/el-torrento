@@ -75,7 +75,7 @@ export default function WatchHome() {
             ))}
           </div>
           {media.length === 0 ? (
-            <p className="text-[var(--muted)]">The library is empty. The signal-check clip appears after the server finishes creating it.</p>
+            <p className="text-[var(--muted)]">The library is empty until a torrent is added on the ingest engine.</p>
           ) : null}
 
           <form

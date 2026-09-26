@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
+import { keptPosition } from "@/src/lib/pieces";
 import { Shell } from "@/components/shell";
 import { Button } from "@/components/ui/button";
 
@@ -15,8 +17,10 @@ type Manifest = {
 
 export function Player({ id }: { id: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const ignoreSeek = useRef(false);
   const pendingTime = useRef(0);
+  const autoDropped = useRef(false);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [profile, setProfile] = useState("original");
   const [generation, setGeneration] = useState(0);
@@ -39,36 +43,67 @@ export function Player({ id }: { id: string }) {
     const video = videoRef.current;
     if (!video || !generation) return;
     const playProfile = profile === "auto" ? "original" : profile;
+    const target = pendingTime.current;
     ignoreSeek.current = true;
-    video.src = `/api/media/${id}/content?g=${generation}&profile=${playProfile}`;
-    const onLoad = () => {
-      const target = pendingTime.current;
+    hlsRef.current?.destroy();
+    hlsRef.current = null;
+
+    const resume = () => {
       if (target > 0 && Number.isFinite(video.duration)) {
-        video.currentTime = Math.min(target, Math.max(0, video.duration - 0.1));
+        video.currentTime = Math.min(target, Math.max(0, video.duration - 0.05));
+      } else if (target > 0) {
+        video.currentTime = target;
       }
       video.play().catch(() => undefined);
       window.setTimeout(() => {
         ignoreSeek.current = false;
       }, 400);
     };
-    video.addEventListener("loadedmetadata", onLoad, { once: true });
+
+    if (playProfile === "original") {
+      video.src = `/api/media/${id}/content?g=${generation}&profile=original`;
+      video.addEventListener("loadedmetadata", resume, { once: true });
+      return;
+    }
+
+    const src = `/api/media/${id}/hls/${generation}/${playProfile}/index.m3u8`;
+    if (Hls.isSupported()) {
+      const hls = new Hls();
+      hlsRef.current = hls;
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, resume);
+      hls.on(Hls.Events.ERROR, () => setHint("Buffering verified pieces for this quality."));
+      return () => {
+        hls.destroy();
+      };
+    }
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = src;
+      video.addEventListener("loadedmetadata", resume, { once: true });
+    }
   }, [generation, id, profile]);
+
+  function currentPosition(): number {
+    return keptPosition(videoRef.current?.currentTime ?? 0, manifest?.position ?? 0);
+  }
 
   async function begin(nextProfile: string) {
     setError("");
-    setHint("");
+    const position = currentPosition();
+    pendingTime.current = position;
+    const sent = nextProfile === "auto" ? "original" : nextProfile;
     const res = await fetch(`/api/media/${id}/play`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile: nextProfile === "auto" ? "original" : nextProfile }),
+      body: JSON.stringify({ profile: sent, positionSeconds: position }),
     });
     const data = await res.json();
     if (!res.ok) {
       setError(data.error ?? "Playback refused.");
       return;
     }
-    pendingTime.current = 0;
     setProfile(nextProfile);
     setGeneration(data.generation);
   }
@@ -96,6 +131,7 @@ export function Player({ id }: { id: string }) {
           controls
           playsInline
           className="aspect-video w-full rounded-lg bg-black"
+          onError={() => setHint("Buffering. Missing pieces are downloading; this is not a bad range.")}
           onSeeked={async () => {
             const video = videoRef.current;
             if (!video || ignoreSeek.current || !generation) return;
@@ -118,15 +154,16 @@ export function Player({ id }: { id: string }) {
             setGeneration(data.generation);
           }}
           onWaiting={() => {
-            if (profile === "auto") {
+            if (profile === "auto" && !autoDropped.current) {
               const has480 = manifest?.profiles.some((item) => item.id === "480p");
               if (has480) {
-                setHint("Switched toward 480p because the download is behind the playhead.");
+                autoDropped.current = true;
+                setHint("Auto dropped toward 480p and kept this position.");
                 begin("480p").catch(() => undefined);
+                return;
               }
-            } else {
-              setHint("Buffering. Manual quality stays here. Auto can drop a level if you switch.");
             }
+            setHint("Buffering. Manual quality stays here. Auto can drop a level if that rendition exists.");
           }}
         />
 

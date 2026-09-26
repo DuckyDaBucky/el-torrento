@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { assertOwner, readSession } from "@/src/lib/db";
 import { readSessionId } from "@/src/lib/http";
-import { listMedia, listRequests, setRequestState } from "@/src/lib/media";
+import { addTorrent, listMedia, listRequests, setRequestState } from "@/src/lib/media";
 import { resolveDownloadDir } from "@/src/lib/storage-guard";
 
 export async function GET(req: Request) {
@@ -28,11 +28,31 @@ export async function POST(req: Request) {
     id?: string;
     state?: string;
     nfsMounted?: boolean;
+    title?: string;
+    torrentPath?: string;
+    savePath?: string;
+    peer?: string;
+    height?: number;
+    durationSec?: number;
+    priorities?: number[];
   };
   try {
     if (body.action === "state" && body.id && body.state) {
       setRequestState(user, body.id, body.state);
       return NextResponse.json({ ok: true, requests: listRequests() });
+    }
+    if (body.action === "add-torrent" && body.title && body.torrentPath && body.savePath) {
+      const row = await addTorrent(user, {
+        id: body.id,
+        title: body.title,
+        torrentPath: body.torrentPath,
+        savePath: body.savePath,
+        peer: body.peer,
+        height: body.height,
+        durationSec: body.durationSec,
+        priorities: body.priorities,
+      });
+      return NextResponse.json({ ok: true, media: row });
     }
     if (body.action === "download-path") {
       const dir = resolveDownloadDir(Boolean(body.nfsMounted), "/mnt/downloads");

@@ -17,7 +17,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     rangeHeader: req.headers.get("range"),
   });
   if ("message" in result) {
-    return NextResponse.json({ error: result.message }, { status: result.status });
+    const headers = result.status === 503 ? { "Retry-After": "1" } : undefined;
+    return NextResponse.json({ error: result.message }, { status: result.status, headers });
   }
   return new NextResponse(new Uint8Array(result.body), {
     status: result.status,
@@ -25,9 +26,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       "Content-Type": result.contentType,
       "Accept-Ranges": "bytes",
       "Content-Length": String(result.body.length),
-      "Content-Range": `bytes ${result.start}-${result.end}/${result.totalAvailable}`,
+      "Content-Range": `bytes ${result.start}-${result.end}/${result.fileSize}`,
       "Cache-Control": "no-store",
-      "X-Available-Bytes": String(result.totalAvailable),
+      "X-File-Size": String(result.fileSize),
     },
   });
 }

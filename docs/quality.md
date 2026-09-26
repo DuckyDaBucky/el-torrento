@@ -1,6 +1,8 @@
 # Quality
 
-Auto is the default. It watches buffer and delivery speed, then restarts the single rendition at the current position. That uses the same generation rule as seek: old segment requests die when a new generation starts. This is not a multi-bitrate HLS ladder.
+Auto starts on the original file. If it buffers and a lower rendition exists, it switches and keeps the playhead. Manual quality does the same: the player sends `positionSeconds`, and the server stores that position instead of restarting at 0.
+
+Transcoded renditions are HLS segments built from verified torrent bytes. The worker does not wait for the whole file to finish. A range inside the file that is still downloading is a wait (then verified bytes), not HTTP 416. 416 is only for a range outside the file.
 
 Manual quality stays at the chosen level. If it keeps buffering, the player can suggest Auto. It does not silently switch.
 

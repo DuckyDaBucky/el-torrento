@@ -10,7 +10,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const { id } = await ctx.params;
   const body = (await req.json().catch(() => ({}))) as { profile?: ProfileId; seconds?: number };
   try {
-    return NextResponse.json(seekPlayback(user, id, Number(body.seconds ?? 0), body.profile ?? "original"));
+    return NextResponse.json(
+      await seekPlayback(user, id, Number(body.seconds ?? 0), body.profile ?? "original"),
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Seek refused." },

@@ -8,9 +8,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const user = readSession(readSessionId(req));
   if (!user) return NextResponse.json({ error: "Sign in required." }, { status: 401 });
   const { id } = await ctx.params;
-  const body = (await req.json().catch(() => ({}))) as { profile?: ProfileId };
+  const body = (await req.json().catch(() => ({}))) as { profile?: ProfileId; positionSeconds?: number };
   try {
-    return NextResponse.json(openPlayback(user, id, body.profile ?? "original"));
+    return NextResponse.json(
+      openPlayback(user, id, body.profile ?? "original", Number(body.positionSeconds ?? 0)),
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Playback refused." },

@@ -1,90 +1,8 @@
-import { open, mkdir, stat } from "node:fs/promises";
-import path from "node:path";
-import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { getDb, getUser, type UserRow, audit } from "./db";
+import { getDb, type UserRow, audit } from "./db";
 import { assertProfileAllowed, deliveryBadge, offeredProfiles, type ProfileId, type SourceFacts } from "./quality";
-import { pieceCount, resolveRange } from "./pieces";
-
-const PIECE_SIZE = 64 * 1024;
-const DEMO_ID = "signal-check";
-
-export function demoPath(): string {
-  return path.join(process.cwd(), "data", "media", "signal-check.mp4");
-}
-
-export function cachePath(profile: string): string {
-  return path.join(process.cwd(), "data", "cache", `signal-check-${profile}.mp4`);
-}
-
-export async function ensureDemoFile(): Promise<{ fileSize: number; pieces: number }> {
-  const file = demoPath();
-  try {
-    const info = await stat(file);
-    if (info.size > 0) {
-      rememberFile(info.size);
-      return { fileSize: info.size, pieces: pieceCount(info.size, PIECE_SIZE) };
-    }
-  } catch {
-    /* create below */
-  }
-  await mkdir(path.dirname(file), { recursive: true });
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      "ffmpeg",
-      [
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc=size=1280x720:rate=24",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=440",
-        "-t",
-        "8",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
-        file,
-      ],
-      { stdio: "ignore" },
-    );
-    child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
-  });
-  const info = await stat(file);
-  rememberFile(info.size);
-  return { fileSize: info.size, pieces: pieceCount(info.size, PIECE_SIZE) };
-}
-
-function rememberFile(fileSize: number): void {
-  const pieces = pieceCount(fileSize, PIECE_SIZE);
-  const start = Math.max(1, Math.ceil(pieces * 0.25));
-  getDb()
-    .prepare(
-      `INSERT INTO media (
-        id, title, height, video_codec, audio_codec, hdr, delivery_confirmed,
-        request_state, available_pieces, piece_count, piece_size, file_path, file_size, encoder_2160
-      ) VALUES (?, ?, 720, 'H.264', 'AAC stereo', NULL, 1, 'available', ?, ?, ?, ?, ?, 0)
-      ON CONFLICT(id) DO UPDATE SET file_size = excluded.file_size, piece_count = excluded.piece_count, file_path = excluded.file_path`,
-    )
-    .run(DEMO_ID, "Signal check", start, pieces, PIECE_SIZE, demoPath(), fileSize);
-}
-
-export function advanceDemoPieces(): number {
-  const row = getMedia(DEMO_ID);
-  if (!row) return 0;
-  const next = Math.min(row.piece_count, row.available_pieces + 1);
-  getDb().prepare("UPDATE media SET available_pieces = ? WHERE id = ?").run(next, DEMO_ID);
-  return next;
-}
+import { byteForTime, piecesCovering, resolveRange } from "./pieces";
+import { engineAdd, enginePrioritize, engineRead, engineStatus, engineWait } from "./engine-client";
+import { randomBytes } from "node:crypto";
 
 export type MediaRow = {
   id: string;
@@ -101,6 +19,7 @@ export type MediaRow = {
   file_path: string | null;
   file_size: number;
   encoder_2160: number;
+  duration_sec: number;
 };
 
 export function getMedia(id: string): MediaRow | undefined {
@@ -122,6 +41,21 @@ export function sourceFacts(row: MediaRow, user: UserRow): SourceFacts {
   };
 }
 
+export async function refreshFromEngine(id: string): Promise<void> {
+  const row = getMedia(id);
+  if (!row) return;
+  try {
+    const status = await engineStatus(id);
+    getDb()
+      .prepare(
+        `UPDATE media SET available_pieces = ?, piece_count = ?, piece_size = ?, file_size = ?, file_path = ? WHERE id = ?`,
+      )
+      .run(status.have.length, status.pieceCount, status.pieceSize, status.fileSize, status.filePath, id);
+  } catch {
+    /* Engine down: keep the last snapshot. */
+  }
+}
+
 export function manifestFor(user: UserRow, id: string) {
   const row = getMedia(id);
   if (!row) return null;
@@ -141,11 +75,18 @@ export function manifestFor(user: UserRow, id: string) {
     generation: playback?.generation ?? 0,
     position: playback?.position_sec ?? 0,
     profile: playback?.profile ?? "original",
+    durationSec: row.duration_sec,
   };
 }
 
-export function openPlayback(user: UserRow, id: string, profile: ProfileId): { generation: number } {
-  const row = mustPlayable(user, id, profile);
+export function openPlayback(
+  user: UserRow,
+  id: string,
+  profile: ProfileId,
+  positionSec = 0,
+): { generation: number; position: number } {
+  mustPlayable(user, id, profile);
+  const position = Number.isFinite(positionSec) && positionSec > 0 ? positionSec : 0;
   const existing = getDb()
     .prepare("SELECT generation FROM playback WHERE user_id = ? AND media_id = ?")
     .get(user.id, id) as { generation: number } | undefined;
@@ -153,28 +94,42 @@ export function openPlayback(user: UserRow, id: string, profile: ProfileId): { g
   getDb()
     .prepare(
       `INSERT INTO playback (user_id, media_id, generation, position_sec, profile)
-       VALUES (?, ?, ?, 0, ?)
-       ON CONFLICT(user_id, media_id) DO UPDATE SET generation = excluded.generation, profile = excluded.profile`,
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, media_id) DO UPDATE SET
+         generation = excluded.generation,
+         profile = excluded.profile,
+         position_sec = excluded.position_sec`,
     )
-    .run(user.id, id, generation, profile);
-  audit(user.id, "play", id, "ok", profile);
-  return { generation };
+    .run(user.id, id, generation, position, profile);
+  audit(user.id, "play", id, "ok", `${profile}@${position}`);
+  return { generation, position };
 }
 
-export function seekPlayback(user: UserRow, id: string, seconds: number, profile: ProfileId): { generation: number } {
-  mustPlayable(user, id, profile);
+export async function seekPlayback(
+  user: UserRow,
+  id: string,
+  seconds: number,
+  profile: ProfileId,
+): Promise<{ generation: number; position: number }> {
+  const row = mustPlayable(user, id, profile);
   const existing = getDb()
     .prepare("SELECT generation FROM playback WHERE user_id = ? AND media_id = ?")
     .get(user.id, id) as { generation: number } | undefined;
   if (!existing) throw new Error("Start playback before seeking.");
   const generation = existing.generation + 1;
+  const position = Math.max(0, seconds);
   getDb()
     .prepare(
       "UPDATE playback SET generation = ?, position_sec = ?, profile = ? WHERE user_id = ? AND media_id = ?",
     )
-    .run(generation, seconds, profile, user.id, id);
+    .run(generation, position, profile, user.id, id);
+  const byte = byteForTime(row.file_size, row.duration_sec, position);
+  const pieces = piecesCovering(byte, Math.min(row.file_size - 1, byte + row.piece_size * 8), row.piece_size, row.file_size);
+  if (pieces.length) {
+    await enginePrioritize(id, pieces, 7).catch(() => undefined);
+  }
   audit(user.id, "seek", id, "ok", `g=${generation}`);
-  return { generation };
+  return { generation, position };
 }
 
 function mustPlayable(user: UserRow, id: string, profile: ProfileId): MediaRow {
@@ -194,6 +149,10 @@ function mustPlayable(user: UserRow, id: string, profile: ProfileId): MediaRow {
   return row;
 }
 
+function waitMs(): number {
+  return Number(process.env.PIECE_WAIT_MS ?? 8000);
+}
+
 export async function readMediaRange(input: {
   user: UserRow;
   id: string;
@@ -201,14 +160,14 @@ export async function readMediaRange(input: {
   profile: ProfileId;
   rangeHeader: string | null;
 }): Promise<
-  | { status: 206 | 200; body: Buffer; start: number; end: number; totalAvailable: number; contentType: string }
-  | { status: 401 | 403 | 404 | 409 | 416; message: string }
+  | { status: 206 | 200; body: Buffer; start: number; end: number; fileSize: number; contentType: string }
+  | { status: 401 | 403 | 404 | 409 | 416 | 503; message: string }
 > {
   if (input.user.status !== "active") {
     return { status: 403, message: "Playback is not allowed for this account." };
   }
   const row = getMedia(input.id);
-  if (!row?.file_path) return { status: 404, message: "No file for that title." };
+  if (!row) return { status: 404, message: "No file for that title." };
   const playback = getDb()
     .prepare("SELECT generation, profile FROM playback WHERE user_id = ? AND media_id = ?")
     .get(input.user.id, input.id) as { generation: number; profile: string } | undefined;
@@ -220,89 +179,109 @@ export async function readMediaRange(input: {
   } catch (error) {
     return { status: 403, message: error instanceof Error ? error.message : "Profile refused." };
   }
+  if (profile !== "original") {
+    return { status: 409, message: "That quality is served as HLS, not a finished MP4." };
+  }
 
-  const file = profile === "original" ? row.file_path : await ensureTranscode(profile);
-  const info = await stat(file);
-  const pieceSize = profile === "original" ? row.piece_size : info.size;
-  const availablePieces = profile === "original" ? row.available_pieces : 1;
   const resolved = resolveRange({
-    fileSize: profile === "original" ? row.file_size || info.size : info.size,
-    pieceSize,
-    availablePieces,
+    fileSize: row.file_size,
     header: input.rangeHeader,
     generation: playback.generation,
     requestedGeneration: input.generation,
   });
   if (!resolved.ok) return { status: resolved.status, message: resolved.message };
-  const length = resolved.end - resolved.start + 1;
-  const handle = await open(file, "r");
+
+  let waited;
   try {
-    const body = Buffer.alloc(length);
-    await handle.read(body, 0, length, resolved.start);
-    const available =
-      profile === "original"
-        ? Math.min(row.file_size || info.size, row.available_pieces * row.piece_size)
-        : info.size;
+    waited = await engineWait(input.id, resolved.start, resolved.end, waitMs());
+  } catch (error) {
+    const status = (error as { status?: number }).status;
+    if (status === 416) return { status: 416, message: "That range is outside the file." };
+    return { status: 503, message: "The torrent engine did not answer." };
+  }
+  if (!waited.ready || waited.verifiedEnd < resolved.start) {
     return {
-      status: input.rangeHeader ? 206 : 200,
-      body,
-      start: resolved.start,
-      end: resolved.end,
-      totalAvailable: available,
-      contentType: "video/mp4",
+      status: 503,
+      message: "Pieces for that position are still downloading. Playback stays open.",
     };
-  } finally {
-    await handle.close();
   }
-}
-
-async function ensureTranscode(profile: string): Promise<string> {
-  const target = cachePath(profile);
   try {
-    const info = await stat(target);
-    if (info.size > 0) return target;
-  } catch {
-    /* encode */
+    const read = await engineRead(input.id, resolved.start, waited.verifiedEnd);
+    const full = !input.rangeHeader && read.body.length === row.file_size;
+    return {
+      status: full ? 200 : 206,
+      body: read.body,
+      start: resolved.start,
+      end: read.verifiedEnd,
+      fileSize: row.file_size,
+      contentType: "video/mp2t",
+    };
+  } catch (error) {
+    const status = (error as { status?: number }).status;
+    if (status === 416) return { status: 416, message: "That range is outside the file." };
+    return { status: 503, message: "Verified bytes were not ready to read." };
   }
-  const height = profile === "480p" ? 480 : profile === "720p" ? 720 : profile === "1080p" ? 1080 : 0;
-  if (!height) throw new Error("That transcode is not available.");
-  await mkdirp(path.dirname(target));
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      "ffmpeg",
-      [
-        "-y",
-        "-i",
-        demoPath(),
-        "-vf",
-        `scale=-2:${height}`,
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-ac",
-        "2",
-        "-movflags",
-        "+faststart",
-        target,
-      ],
-      { stdio: "ignore" },
-    );
-    child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
-  });
-  return target;
 }
 
-async function mkdirp(dir: string) {
-  const { mkdir } = await import("node:fs/promises");
-  await mkdir(dir, { recursive: true });
+export async function addTorrent(
+  user: UserRow,
+  input: {
+    id?: string;
+    title: string;
+    torrentPath: string;
+    savePath: string;
+    peer?: string;
+    height?: number;
+    durationSec?: number;
+    priorities?: number[];
+    encoder2160?: boolean;
+  },
+): Promise<MediaRow> {
+  if (user.role !== "owner") throw new Error("Owner access is required.");
+  const id = input.id ?? `med_${randomBytes(8).toString("hex")}`;
+  const status = await engineAdd({
+    id,
+    torrentPath: input.torrentPath,
+    savePath: input.savePath,
+    peer: input.peer,
+    priorities: input.priorities,
+  });
+  getDb()
+    .prepare(
+      `INSERT INTO media (
+        id, title, height, video_codec, audio_codec, hdr, delivery_confirmed,
+        request_state, available_pieces, piece_count, piece_size, file_path, file_size, encoder_2160, duration_sec
+      ) VALUES (?, ?, ?, 'H.264', 'AAC stereo', NULL, 0, 'available', ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        file_size = excluded.file_size,
+        piece_count = excluded.piece_count,
+        piece_size = excluded.piece_size,
+        available_pieces = excluded.available_pieces,
+        file_path = excluded.file_path,
+        duration_sec = excluded.duration_sec`,
+    )
+    .run(
+      id,
+      input.title.trim(),
+      input.height ?? 720,
+      status.have.length,
+      status.pieceCount,
+      status.pieceSize,
+      status.filePath,
+      status.fileSize,
+      input.encoder2160 ? 1 : 0,
+      input.durationSec ?? 0,
+    );
+  audit(user.id, "add-torrent", id, "ok", input.title);
+  const row = getMedia(id);
+  if (!row) throw new Error("Torrent was added but not stored.");
+  return row;
 }
 
 export function createRequest(user: UserRow, title: string): { id: string } {
   if (user.status !== "active") throw new Error("Account cannot request titles.");
+  const trimmed = title.trim();
+  if (!trimmed) throw new Error("Enter a title.");
   const count = getDb()
     .prepare("SELECT COUNT(*) AS n FROM media_requests WHERE user_id = ? AND state NOT IN ('available', 'failed')")
     .get(user.id) as { n: number };
@@ -311,19 +290,37 @@ export function createRequest(user: UserRow, title: string): { id: string } {
   }
   const id = `req_${randomBytes(8).toString("hex")}`;
   getDb()
-    .prepare("INSERT INTO media_requests (id, user_id, title, state, created_at) VALUES (?, ?, ?, 'requested', ?)")
-    .run(id, user.id, title.trim(), new Date().toISOString());
+    .prepare(
+      "INSERT INTO media_requests (id, user_id, title, state, created_at, seerr_request_id) VALUES (?, ?, ?, 'requested', ?, NULL)",
+    )
+    .run(id, user.id, trimmed, new Date().toISOString());
   return { id };
+}
+
+export function saveSeerrRequest(id: string, externalId: string | null, error: string | null): void {
+  getDb()
+    .prepare("UPDATE media_requests SET seerr_request_id = ?, state = ? WHERE id = ?")
+    .run(externalId, externalId ? "resolving" : "requested", id);
+  if (error) {
+    getDb().prepare("UPDATE media_requests SET state = 'requested' WHERE id = ? AND seerr_request_id IS NULL").run(id);
+  }
 }
 
 export function listRequests() {
   return getDb()
     .prepare(
-      `SELECT r.id, r.title, r.state, r.created_at as createdAt, u.email
+      `SELECT r.id, r.title, r.state, r.created_at as createdAt, r.seerr_request_id as seerrRequestId, u.email
        FROM media_requests r JOIN users u ON u.id = r.user_id
        ORDER BY r.created_at DESC`,
     )
-    .all() as { id: string; title: string; state: string; createdAt: string; email: string }[];
+    .all() as {
+    id: string;
+    title: string;
+    state: string;
+    createdAt: string;
+    seerrRequestId: string | null;
+    email: string;
+  }[];
 }
 
 const REQUEST_STATES = new Set(["requested", "resolving", "downloading", "importing", "available", "failed"]);
@@ -336,14 +333,3 @@ export function setRequestState(actor: UserRow, id: string, state: string): void
   getDb().prepare("UPDATE media_requests SET state = ? WHERE id = ?").run(state, id);
   audit(actor.id, "request-state", id, "ok", state);
 }
-
-export async function fileExists(file: string): Promise<boolean> {
-  try {
-    await stat(file);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export { DEMO_ID };

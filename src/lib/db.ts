@@ -131,10 +131,16 @@ export function getDb(): DatabaseSync {
       created_at TEXT NOT NULL
     );
   `);
-  if (process.env.NEXT_RUNTIME === "nodejs") {
-    void import("./demo-bootstrap").then((m) => m.ensureDemoRuntime());
-  }
+  ensureColumn(db, "media", "duration_sec", "REAL NOT NULL DEFAULT 0");
+  ensureColumn(db, "media_requests", "seerr_request_id", "TEXT");
   return db;
+}
+
+function ensureColumn(database: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((col) => col.name === column)) {
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  }
 }
 
 function hashSecret(value: string): string {
