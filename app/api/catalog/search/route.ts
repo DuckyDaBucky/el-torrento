@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { buildCatalogCards } from "@/src/lib/catalog";
 import { readSession } from "@/src/lib/db";
 import { readSessionId } from "@/src/lib/http";
 import { searchTmdb } from "@/src/lib/tmdb";
@@ -13,10 +14,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: tmdb.error ?? "Search failed.", results: [] }, { status: 503 });
   }
   return NextResponse.json({
-    results: tmdb.results.map((hit) => ({
-      ...hit,
-      playable: false,
-      discoverable: true,
-    })),
+    query: query.trim(),
+    results: buildCatalogCards(tmdb.results, user),
   });
 }
