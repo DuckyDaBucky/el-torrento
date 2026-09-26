@@ -131,6 +131,9 @@ export function getDb(): DatabaseSync {
       created_at TEXT NOT NULL
     );
   `);
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    void import("./demo-bootstrap").then((m) => m.ensureDemoRuntime());
+  }
   return db;
 }
 
