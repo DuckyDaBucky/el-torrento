@@ -99,6 +99,71 @@ export async function syncSeerr(input: {
   }
 }
 
+export type JellyfinBrowseItem = {
+  id: string;
+  title: string;
+  year: string | null;
+  type: "Movie" | "Series" | "Episode" | string;
+  imageUrl: string | null;
+  playUrl: string | null;
+};
+
+export async function listJellyfinLibrary(input: {
+  baseUrl: string | undefined;
+  apiKey: string | undefined;
+  publicBaseUrl?: string;
+  limit?: number;
+  fetchImpl?: FetchLike;
+}): Promise<{ ok: boolean; items: JellyfinBrowseItem[]; error?: string }> {
+  if (!input.baseUrl || !input.apiKey) {
+    return { ok: false, items: [], error: "Jellyfin is not configured." };
+  }
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const root = input.baseUrl.replace(/\/$/, "");
+  const publicRoot = (input.publicBaseUrl ?? "https://media.hasnain.us").replace(/\/$/, "");
+  const limit = input.limit ?? 24;
+  try {
+    const response = await fetchImpl(
+      `${root}/Items?Recursive=true&IncludeItemTypes=Movie,Series&SortBy=DateCreated&SortOrder=Descending&Limit=${limit}&Fields=ProductionYear,PrimaryImageTag,Type`,
+      {
+        headers: { "X-Emby-Token": input.apiKey, Accept: "application/json" },
+        signal: AbortSignal.timeout(8000),
+      },
+    );
+    if (!response.ok) {
+      return { ok: false, items: [], error: `Jellyfin HTTP ${response.status}` };
+    }
+    const body = (await response.json()) as {
+      Items?: {
+        Id?: string;
+        Name?: string;
+        ProductionYear?: number;
+        Type?: string;
+        ImageTags?: { Primary?: string };
+      }[];
+    };
+    const items: JellyfinBrowseItem[] = (body.Items ?? [])
+      .filter((item) => item.Id && item.Name)
+      .map((item) => ({
+        id: item.Id!,
+        title: item.Name!,
+        year: item.ProductionYear ? String(item.ProductionYear) : null,
+        type: item.Type ?? "Unknown",
+        imageUrl: item.ImageTags?.Primary
+          ? `${root}/Items/${item.Id}/Images/Primary?tag=${item.ImageTags.Primary}`
+          : null,
+        playUrl: `${publicRoot}/web/index.html#!/details?id=${item.Id}`,
+      }));
+    return { ok: true, items };
+  } catch (error) {
+    return {
+      ok: false,
+      items: [],
+      error: error instanceof Error ? error.message : "Jellyfin browse failed.",
+    };
+  }
+}
+
 type SeerrHit = { id?: number; mediaType?: string; title?: string };
 
 /** Search Seerr and create a request. This is the Jellyseerr /api/v1/request contract. */
