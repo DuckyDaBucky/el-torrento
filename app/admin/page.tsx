@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Shell } from "@/components/shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { LiveNode } from "@/src/lib/cluster";
+import { layoutNodes, type LiveNode } from "@/src/lib/cluster";
 
 type Section = "cluster" | "users" | "media" | "sources" | "services" | "mcp";
 
@@ -32,7 +32,8 @@ type PublicUser = {
   links: { service: string; externalId: string | null; syncError: string | null }[];
 };
 
-const POWERABLE_GUESTS = new Set(["media-storage", "media-apps", "media-ingest"]);
+const POWERABLE_GUESTS = new Set(["media-storage", "media-ingest"]);
+const SLOTS = ["left", "center", "right"] as const;
 
 const DEPLOY_TEMPLATE = {
   name: "el-torrento-api",
@@ -72,22 +73,26 @@ function isStale(checkedAt: string | null, maxAgeMs = 5 * 60 * 1000): boolean {
   return !Number.isFinite(age) || age > maxAgeMs;
 }
 
-function nodePanel(node: LiveNode, preflight?: { ram: string; root: string; thinPool: string }): string {
+function nodePanel(node: LiveNode, slot: (typeof SLOTS)[number]): string {
+  const stale = node.stale || node.online !== "online" || isStale(node.checkedAt);
   const online =
-    node.online === "online" ? "ONLINE" : node.online === "offline" ? "OFFLINE" : "UNKNOWN";
-  const stale = node.online !== "online" || isStale(node.checkedAt);
+    !stale && node.online === "online" ? "ONLINE" : node.online === "offline" ? "OFFLINE" : "UNKNOWN";
+  const metric = (value: string | null) => (stale ? "unknown" : formatMetric(value));
   const lines = [
+    `slot: ${slot}`,
     `${node.model} · ${node.ip}`,
-    `state: ${online}${stale ? " (stale/unknown)" : ""}`,
-    `uptime: ${formatMetric(node.uptime)}`,
-    `cpu: ${formatMetric(node.cpu)}`,
-    `ram: ${formatMetric(node.ram, preflight?.ram ?? "unknown")}`,
-    `disk: ${formatMetric(node.storage, preflight?.root ?? "unknown")}`,
-    `thin: ${formatMetric(node.thinPool, preflight?.thinPool ?? "unknown")}`,
+    `state: ${online}${stale ? " (stale)" : ""}`,
+    `uptime: ${metric(node.uptime)}`,
+    `cpu: ${metric(node.cpu)}`,
+    `ram: ${metric(node.ram)}`,
+    `disk: ${metric(node.storage)}`,
+    `thin: ${metric(node.thinPool)}`,
+    `disks: ${metric(node.diskHealth)}`,
+    `temp: ${metric(node.temperature)}`,
   ];
   if (node.reason) lines.push(`note: ${node.reason}`);
   if (node.checkedAt) lines.push(`checked: ${node.checkedAt}`);
-  return asciiBox(node.title.toUpperCase(), lines);
+  return asciiBox(`${node.title.toUpperCase()} · ${slot.toUpperCase()}`, lines);
 }
 
 function SectionNav({
@@ -152,12 +157,6 @@ export default function AdminPage() {
     { id: string; label: string; kind: string; enabled: boolean; tested: boolean; notes: string | null }[]
   >([]);
   const [prowlarrNote, setProwlarrNote] = useState("");
-
-  const preflightById = useMemo(() => {
-    const map = new Map<string, { ram: string; root: string; thinPool: string }>();
-    cluster?.preflight.nodes.forEach((node) => map.set(node.id, node));
-    return map;
-  }, [cluster]);
 
   const loadAuth = useCallback(async () => {
     const { ok, data } = await api<{ user: { role: string } | null }>("/api/auth");
@@ -284,7 +283,7 @@ export default function AdminPage() {
           <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--phosphor)]/60">server.hasnain.us</p>
           <h1 className="font-mono text-2xl text-[var(--phosphor)]">Homelab console</h1>
           <p className="max-w-2xl font-mono text-xs text-[var(--phosphor)]/70">
-            Read-only cluster metrics when configured. Missing collectors stay unknown. Preflight rows are historical, not live.
+            Read-only cluster metrics when Proxmox answers. Unreachable collectors stay unknown and stale. Historical preflight is not a live reading.
           </p>
           <SectionNav active={section} onSelect={setSection} />
         </header>
@@ -301,21 +300,25 @@ export default function AdminPage() {
                 {asciiBox("LIVE FEED", [cluster.live.error, "Panels below show unknown until Proxmox responds."])}
               </pre>
             ) : null}
-            <div className="grid gap-4 lg:grid-cols-3">
-              {(cluster?.live.nodes ?? []).map((node) => (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              {layoutNodes(cluster?.live.nodes).map((node, index) => (
                 <pre
                   key={node.id}
+                  data-node={node.id}
+                  data-slot={SLOTS[index]}
                   className="overflow-x-auto whitespace-pre border border-[var(--term-line)] bg-black/50 p-3 font-mono text-[11px] leading-relaxed text-[var(--phosphor)]"
                 >
-                  {nodePanel(node, preflightById.get(node.id))}
+                  {nodePanel(node, SLOTS[index])}
                 </pre>
               ))}
             </div>
             {cluster ? (
               <pre className="whitespace-pre-wrap border border-[var(--term-line)] bg-black/30 p-3 font-mono text-xs text-[var(--phosphor)]/80">
-                {asciiBox("AGGREGATE", [
-                  `quorum (live): ${cluster.live.quorum ?? "unknown"}`,
-                  `quorum (preflight ${cluster.preflight.collectedAt}): ${cluster.preflight.quorum}`,
+                {asciiBox("HISTORICAL PREFLIGHT", [
+                  "Not a live reading. Panels above do not copy these numbers.",
+                  `collected: ${cluster.preflight.collectedAt}`,
+                  `quorum then: ${cluster.preflight.quorum}`,
+                  `quorum now: ${cluster.live.quorum ?? "unknown"}`,
                   `source: ${cluster.preflight.source}`,
                 ])}
               </pre>

@@ -6,6 +6,8 @@ export type LiveNode = {
   model: string;
   ip: string;
   online: "online" | "offline" | "unknown";
+  /** True when this row is not a current Proxmox reading. */
+  stale: boolean;
   uptime: string | null;
   cpu: string | null;
   ram: string | null;
@@ -53,13 +55,14 @@ export const PREFLIGHT_SNAPSHOT = {
   ],
 };
 
-function unknownNode(meta: (typeof NODE_ORDER)[number], reason: string | null): LiveNode {
+function emptyMetrics(meta: (typeof NODE_ORDER)[number], reason: string | null, checkedAt: string | null): LiveNode {
   return {
     id: meta.id,
     title: meta.title,
     model: meta.model,
     ip: meta.ip,
     online: "unknown",
+    stale: true,
     uptime: null,
     cpu: null,
     ram: null,
@@ -70,9 +73,26 @@ function unknownNode(meta: (typeof NODE_ORDER)[number], reason: string | null): 
     guests: null,
     temperature: null,
     warnings: [],
-    checkedAt: new Date().toISOString(),
+    checkedAt,
     reason,
   };
+}
+
+function unknownNode(meta: (typeof NODE_ORDER)[number], reason: string | null): LiveNode {
+  return emptyMetrics(meta, reason, new Date().toISOString());
+}
+
+/** Stable placeholder for the dashboard. No clock, no invented metrics. */
+export function blankNode(meta: (typeof NODE_ORDER)[number], reason: string): LiveNode {
+  return emptyMetrics(meta, reason, null);
+}
+
+/** Always left, center, right. Missing rows stay unknown instead of shifting columns. */
+export function layoutNodes(nodes: LiveNode[] | undefined): LiveNode[] {
+  return NODE_ORDER.map((meta) => {
+    const found = nodes?.find((node) => node.id === meta.id);
+    return found ?? blankNode(meta, "Collector returned no row for this node.");
+  });
 }
 
 type PveStatus = {
@@ -137,6 +157,11 @@ export async function collectLiveNodes(opts?: {
       }
       const body = (await nodeRes.json()) as { data?: PveStatus };
       const data = body.data ?? {};
+      const hasReading = data.uptime != null || typeof data.cpu === "number" || data.memory?.total != null;
+      if (!hasReading) {
+        nodes.push(unknownNode(meta, "Proxmox returned no status fields."));
+        continue;
+      }
       const cpu = typeof data.cpu === "number" ? `${Math.round(data.cpu * 100)}%` : null;
       const ram =
         data.memory?.used != null && data.memory.total
@@ -145,12 +170,11 @@ export async function collectLiveNodes(opts?: {
       nodes.push({
         ...unknownNode(meta, null),
         online: "online",
+        stale: false,
         uptime: data.uptime != null ? `${Math.floor(data.uptime / 3600)}h` : null,
         cpu,
         ram,
         reason: null,
-        temperature: null,
-        diskHealth: null,
       });
     }
     return { nodes, quorum, error: null };
