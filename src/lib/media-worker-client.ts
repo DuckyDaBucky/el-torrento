@@ -5,15 +5,28 @@ type EnsureInput = {
   positionSec: number;
   fileSize: number;
   durationSec: number;
+  verifiedStart: number;
+  verifiedEnd: number;
 };
 
 export function mediaWorkerBase(): string | undefined {
   return process.env.MEDIA_WORKER_URL?.replace(/\/$/, "") || undefined;
 }
 
+function verifiedWindow(input: EnsureInput): boolean {
+  return (
+    Number.isFinite(input.verifiedStart) &&
+    Number.isFinite(input.verifiedEnd) &&
+    input.verifiedStart >= 0 &&
+    input.verifiedEnd >= input.verifiedStart
+  );
+}
+
+/** Asks the worker to package a window the engine already hash-checked. */
 export async function ensureHlsOnWorker(input: EnsureInput): Promise<{ ready: boolean; baseTimestamp?: number }> {
   const base = mediaWorkerBase();
   if (!base) return { ready: false };
+  if (!verifiedWindow(input)) return { ready: false };
   const res = await fetch(
     `${base}/v1/hls/${encodeURIComponent(input.torrentId)}/${input.generation}/${encodeURIComponent(input.profile)}`,
     {
@@ -23,6 +36,9 @@ export async function ensureHlsOnWorker(input: EnsureInput): Promise<{ ready: bo
         positionSec: input.positionSec,
         fileSize: input.fileSize,
         durationSec: input.durationSec,
+        verifiedStart: input.verifiedStart,
+        verifiedEnd: input.verifiedEnd,
+        verifiedBytesOnly: true,
       }),
       signal: AbortSignal.timeout(Number(process.env.MEDIA_WORKER_TIMEOUT_MS ?? 120000)),
     },

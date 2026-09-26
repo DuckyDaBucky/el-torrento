@@ -40,9 +40,17 @@ export async function GET(
         positionSec: playback.position_sec ?? 0,
       });
       if (!built.ready || !built.playlist) {
+        const software = built.reason === "software-4k";
+        const upscale = built.reason === "upscale";
+        const error = software
+          ? "2160p software transcode is not enabled."
+          : upscale
+            ? "That rendition would upscale the source."
+            : "Not enough verified pieces to start this rendition yet.";
+        const status = software || upscale ? 409 : 503;
         return NextResponse.json(
-          { error: "Not enough verified pieces to start this rendition yet." },
-          { status: 503, headers: { "Retry-After": "1" } },
+          { error },
+          { status, headers: status === 503 ? { "Retry-After": "1" } : undefined },
         );
       }
       useRemote = Boolean(built.remote);

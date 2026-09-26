@@ -8,11 +8,21 @@ type HlsSource = {
   id: string;
   file_size: number;
   duration_sec: number;
+  height?: number;
 };
 
 const WINDOW_BYTES = 512 * 1024;
 
-function heightFor(profile: string): number {
+export type HlsReason = "software-4k" | "upscale" | "unverified";
+
+export type HlsReady = {
+  ready: boolean;
+  playlist?: string;
+  remote?: boolean;
+  reason?: HlsReason;
+};
+
+export function heightFor(profile: string): number {
   if (profile === "2160p") return 2160;
   if (profile === "1080p") return 1080;
   if (profile === "720p") return 720;
@@ -20,8 +30,41 @@ function heightFor(profile: string): number {
   return 0;
 }
 
+/** Software 4K encode is not enabled. A hardware path is not assumed here. */
+export function software4kEnabled(): boolean {
+  return false;
+}
+
+/** Fit inside the target height. Never scales a shorter picture up. */
+export function downscaleFilter(height: number): string {
+  return `scale=-2:'min(${height},ih)'`;
+}
+
 export function hlsDir(mediaId: string, generation: number, profile: string): string {
   return path.join(process.cwd(), "data", "hls", mediaId, String(generation), profile);
+}
+
+async function verifiedSlice(
+  row: HlsSource,
+  positionSec: number,
+): Promise<{ start: number; end: number; body: Buffer } | null> {
+  if (row.file_size <= 0) return null;
+  const duration = row.duration_sec > 0 ? row.duration_sec : 1;
+  const ratio = Math.min(0.98, Math.max(0, positionSec / duration));
+  const start = Math.min(row.file_size - 1, Math.floor(ratio * row.file_size));
+  const aligned = start - (start % 188);
+  if (aligned < 0 || aligned >= row.file_size) return null;
+  const end = Math.min(row.file_size - 1, aligned + WINDOW_BYTES - 1);
+  try {
+    const timeout = Number(process.env.PIECE_WAIT_MS ?? 8000);
+    const waited = await engineWait(row.id, aligned, end, timeout);
+    if (!waited.ready || waited.verifiedEnd < aligned) return null;
+    const bytes = await engineRead(row.id, aligned, waited.verifiedEnd);
+    if (bytes.body.length < 188 * 8) return null;
+    return { start: aligned, end: bytes.verifiedEnd, body: bytes.body };
+  } catch {
+    return null;
+  }
 }
 
 export async function ensureHls(input: {
@@ -29,45 +72,48 @@ export async function ensureHls(input: {
   generation: number;
   profile: string;
   positionSec: number;
-}): Promise<{ ready: boolean; playlist?: string; remote?: boolean }> {
+}): Promise<HlsReady> {
+  if (input.profile === "2160p") {
+    return { ready: false, reason: "software-4k" };
+  }
   const height = heightFor(input.profile);
-  if (!height) return { ready: false };
+  if (!height) return { ready: false, reason: "unverified" };
+  if ((input.row.height ?? 0) > 0 && height > (input.row.height ?? 0)) {
+    return { ready: false, reason: "upscale" };
+  }
+
+  const slice = await verifiedSlice(input.row, input.positionSec);
+  if (!slice) return { ready: false, reason: "unverified" };
 
   if (mediaWorkerBase()) {
-    const remote = await ensureHlsOnWorker({
-      torrentId: input.row.id,
-      generation: input.generation,
-      profile: input.profile,
-      positionSec: input.positionSec,
-      fileSize: input.row.file_size,
-      durationSec: input.row.duration_sec,
-    });
-    if (remote.ready) {
+    try {
+      const remote = await ensureHlsOnWorker({
+        torrentId: input.row.id,
+        generation: input.generation,
+        profile: input.profile,
+        positionSec: input.positionSec,
+        fileSize: input.row.file_size,
+        durationSec: input.row.duration_sec,
+        verifiedStart: slice.start,
+        verifiedEnd: slice.end,
+      });
+      if (!remote.ready) return { ready: false, reason: "unverified" };
       return { ready: true, playlist: "remote", remote: true };
+    } catch {
+      return { ready: false, reason: "unverified" };
     }
-    return { ready: false };
   }
-  const duration = input.row.duration_sec > 0 ? input.row.duration_sec : 1;
-  const ratio = Math.min(0.98, Math.max(0, input.positionSec / duration));
-  const start = Math.min(input.row.file_size - 1, Math.floor(ratio * input.row.file_size));
-  const aligned = start - (start % 188);
-  const end = Math.min(input.row.file_size - 1, aligned + WINDOW_BYTES - 1);
-  const timeout = Number(process.env.PIECE_WAIT_MS ?? 8000);
-  const waited = await engineWait(input.row.id, aligned, end, timeout);
-  if (!waited.ready || waited.verifiedEnd < aligned) return { ready: false };
-  const bytes = await engineRead(input.row.id, aligned, waited.verifiedEnd);
-  if (bytes.body.length < 188 * 8) return { ready: false };
 
   const dir = hlsDir(input.row.id, input.generation, input.profile);
   await mkdir(dir, { recursive: true });
   const partial = path.join(dir, "partial.mpegts");
-  await writeFile(partial, bytes.body);
+  await writeFile(partial, slice.body);
   const playlist = path.join(dir, "index.m3u8");
   await runFfmpeg(partial, dir, height);
   const info = await stat(playlist).catch(() => null);
-  if (!info || info.size === 0) return { ready: false };
+  if (!info || info.size === 0) return { ready: false, reason: "unverified" };
   const text = await readFile(playlist, "utf8");
-  if (!text.includes("#EXTINF")) return { ready: false };
+  if (!text.includes("#EXTINF")) return { ready: false, reason: "unverified" };
   return { ready: true, playlist };
 }
 
@@ -83,7 +129,7 @@ function runFfmpeg(input: string, dir: string, height: number): Promise<void> {
         "-i",
         input,
         "-vf",
-        `scale=-2:${height}`,
+        downscaleFilter(height),
         "-c:v",
         "libx264",
         "-preset",

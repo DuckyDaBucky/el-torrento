@@ -20,6 +20,12 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     const headers = result.status === 503 ? { "Retry-After": "1" } : undefined;
     return NextResponse.json({ error: result.message }, { status: result.status, headers });
   }
+  if (result.body.length === 0) {
+    return NextResponse.json(
+      { error: "Verified bytes were not ready to read." },
+      { status: 503, headers: { "Retry-After": "1" } },
+    );
+  }
   return new NextResponse(new Uint8Array(result.body), {
     status: result.status,
     headers: {

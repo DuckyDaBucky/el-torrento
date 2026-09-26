@@ -12,10 +12,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     positionSeconds?: number;
     quality?: ProfileId;
   };
+  const rawPosition = Number(body.positionSeconds ?? 0);
+  const position = Number.isFinite(rawPosition) ? Math.max(0, rawPosition) : 0;
   try {
-    return NextResponse.json(
-      await changePlayback(user, id, Number(body.positionSeconds ?? 0), body.quality ?? "auto"),
-    );
+    return NextResponse.json(await changePlayback(user, id, position, body.quality ?? "auto"));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Playback refused." },
