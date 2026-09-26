@@ -15,26 +15,41 @@ export async function syncJellyfin(input: {
   }
   const fetchImpl = input.fetchImpl ?? fetch;
   const disabled = input.user.status === "suspended" || input.user.status === "revoked";
+  const root = input.baseUrl.replace(/\/$/, "");
+  const headers = { "X-Emby-Token": input.apiKey, "Content-Type": "application/json" };
+  const policy = { IsDisabled: disabled };
   try {
-    const response = await fetchImpl(`${input.baseUrl.replace(/\/$/, "")}/Users/New`, {
-      method: "POST",
-      headers: {
-        "X-Emby-Token": input.apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        Name: input.user.id,
-        Policy: { IsDisabled: disabled },
-      }),
+    const existingLink = input.user.id;
+    const prior = await fetchImpl(`${root}/Users`, {
+      headers: { "X-Emby-Token": input.apiKey },
       signal: AbortSignal.timeout(5000),
-    });
+    }).catch(() => null);
+    let externalId: string | null = null;
+    if (prior?.ok) {
+      const users = (await prior.json()) as { Id?: string; Name?: string }[];
+      const match = users.find((item) => item.Name === existingLink);
+      externalId = match?.Id ?? null;
+    }
+    const response = externalId
+      ? await fetchImpl(`${root}/Users/${externalId}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ Name: input.user.id, Policy: policy }),
+          signal: AbortSignal.timeout(5000),
+        })
+      : await fetchImpl(`${root}/Users/New`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ Name: input.user.id, Policy: policy }),
+          signal: AbortSignal.timeout(5000),
+        });
     if (!response.ok) {
       const error = `Jellyfin HTTP ${response.status}`;
-      saveServiceLink(input.user.id, "jellyfin", null, error);
+      saveServiceLink(input.user.id, "jellyfin", externalId, error);
       return { ok: false, error };
     }
     const body = (await response.json()) as { Id?: string };
-    const externalId = body.Id ?? null;
+    externalId = body.Id ?? externalId;
     saveServiceLink(input.user.id, "jellyfin", externalId, null);
     return { ok: true, externalId: externalId ?? undefined };
   } catch (error) {
@@ -89,6 +104,8 @@ type SeerrHit = { id?: number; mediaType?: string; title?: string };
 /** Search Seerr and create a request. This is the Jellyseerr /api/v1/request contract. */
 export async function requestTitleInSeerr(input: {
   title: string;
+  tmdbId?: string;
+  mediaType?: "movie" | "tv";
   baseUrl: string | undefined;
   apiKey: string | undefined;
   fetchImpl?: FetchLike;
@@ -99,13 +116,18 @@ export async function requestTitleInSeerr(input: {
   const fetchImpl = input.fetchImpl ?? fetch;
   const root = input.baseUrl.replace(/\/$/, "");
   try {
-    const search = await fetchImpl(`${root}/api/v1/search?query=${encodeURIComponent(input.title)}&page=1`, {
-      headers: { "X-Api-Key": input.apiKey, Accept: "application/json" },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!search.ok) return { ok: false, error: `Seerr search HTTP ${search.status}` };
-    const found = (await search.json()) as { results?: SeerrHit[] };
-    const hit = (found.results ?? []).find((item) => item.id != null && item.mediaType);
+    let hit: SeerrHit | undefined;
+    if (input.tmdbId && input.mediaType) {
+      hit = { id: Number(input.tmdbId), mediaType: input.mediaType, title: input.title };
+    } else {
+      const search = await fetchImpl(`${root}/api/v1/search?query=${encodeURIComponent(input.title)}&page=1`, {
+        headers: { "X-Api-Key": input.apiKey, Accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!search.ok) return { ok: false, error: `Seerr search HTTP ${search.status}` };
+      const found = (await search.json()) as { results?: SeerrHit[] };
+      hit = (found.results ?? []).find((item) => item.id != null && item.mediaType);
+    }
     if (!hit?.id || !hit.mediaType) return { ok: false, error: "Seerr has no match for that title." };
     const created = await fetchImpl(`${root}/api/v1/request`, {
       method: "POST",

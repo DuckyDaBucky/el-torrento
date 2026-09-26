@@ -13,11 +13,20 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const user = readSession(readSessionId(req));
   if (!user) return NextResponse.json({ error: "Sign in required." }, { status: 401 });
-  const body = (await req.json().catch(() => ({}))) as { title?: string };
+  const body = (await req.json().catch(() => ({}))) as {
+    title?: string;
+    tmdbId?: string;
+    mediaType?: "movie" | "tv";
+  };
   try {
-    const created = createRequest(user, body.title ?? "");
+    const created = createRequest(user, body.title ?? "", {
+      tmdbId: body.tmdbId,
+      mediaType: body.mediaType,
+    });
     const seerr = await requestTitleInSeerr({
       title: body.title ?? "",
+      tmdbId: body.tmdbId,
+      mediaType: body.mediaType,
       baseUrl: process.env.SEERR_URL,
       apiKey: process.env.SEERR_API_KEY,
     });

@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { BOOTSTRAP_OWNER_EMAIL, decideFirstContact, type Identity } from "./access";
+import { opensDatabase } from "./runtime";
 
 export type Role = "owner" | "viewer";
 export type UserStatus = "pending" | "active" | "suspended" | "revoked";
@@ -45,6 +46,9 @@ export function resetDbForTests(): void {
 }
 
 export function getDb(): DatabaseSync {
+  if (!opensDatabase()) {
+    throw new Error("This process does not open the app database. Use the admin API service.");
+  }
   if (db) return db;
   const file = dbPath();
   if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
@@ -133,7 +137,38 @@ export function getDb(): DatabaseSync {
   `);
   ensureColumn(db, "media", "duration_sec", "REAL NOT NULL DEFAULT 0");
   ensureColumn(db, "media_requests", "seerr_request_id", "TEXT");
+  ensureColumn(db, "media_requests", "tmdb_id", "TEXT");
+  ensureColumn(db, "media_requests", "media_type", "TEXT");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS indexer_sources (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      prowlarr_definition TEXT,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      tested INTEGER NOT NULL DEFAULT 0,
+      notes TEXT
+    );
+  `);
+  seedIndexerSources(db);
   return db;
+}
+
+function seedIndexerSources(database: DatabaseSync): void {
+  const defaults: { id: string; label: string; kind: string; prowlarr_definition: string | null; notes: string }[] = [
+    { id: "1337x", label: "1337x", kind: "public", prowlarr_definition: "1337x", notes: "Disabled until search is verified." },
+    { id: "eztv", label: "EZTV", kind: "public", prowlarr_definition: "eztv", notes: "Disabled until search is verified." },
+    { id: "nyaa", label: "Nyaa", kind: "public", prowlarr_definition: "nyaa", notes: "Optional; disabled by default." },
+    { id: "torrentleech", label: "TorrentLeech", kind: "private", prowlarr_definition: null, notes: "Off unless access and client rules are confirmed." },
+  ];
+  const insert = database.prepare(
+    `INSERT INTO indexer_sources (id, label, kind, prowlarr_definition, enabled, tested, notes)
+     VALUES (?, ?, ?, ?, 0, 0, ?)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+  for (const row of defaults) {
+    insert.run(row.id, row.label, row.kind, row.prowlarr_definition, row.notes);
+  }
 }
 
 function ensureColumn(database: DatabaseSync, table: string, column: string, ddl: string): void {

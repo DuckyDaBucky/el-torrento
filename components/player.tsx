@@ -21,6 +21,8 @@ export function Player({ id }: { id: string }) {
   const ignoreSeek = useRef(false);
   const pendingTime = useRef(0);
   const autoDropped = useRef(false);
+  const waitingSince = useRef<number | null>(null);
+  const waitingTimer = useRef<number | null>(null);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [profile, setProfile] = useState("original");
   const [generation, setGeneration] = useState(0);
@@ -154,16 +156,40 @@ export function Player({ id }: { id: string }) {
             setGeneration(data.generation);
           }}
           onWaiting={() => {
-            if (profile === "auto" && !autoDropped.current) {
-              const has480 = manifest?.profiles.some((item) => item.id === "480p");
-              if (has480) {
-                autoDropped.current = true;
-                setHint("Auto dropped toward 480p and kept this position.");
-                begin("480p").catch(() => undefined);
+            if (profile !== "auto" || autoDropped.current) {
+              setHint("Buffering verified pieces. Manual quality keeps this position.");
+              return;
+            }
+            const video = videoRef.current;
+            if (!video) return;
+            const now = Date.now();
+            if (waitingSince.current == null) waitingSince.current = now;
+            if (waitingTimer.current != null) return;
+            waitingTimer.current = window.setTimeout(() => {
+              waitingTimer.current = null;
+              const elapsed = Date.now() - (waitingSince.current ?? now);
+              const rate = video.playbackRate;
+              if (elapsed < 2500 || rate > 0 && video.readyState >= 2) {
+                waitingSince.current = null;
                 return;
               }
+              const order = ["2160p", "1080p", "720p", "480p"];
+              const current = profile === "auto" ? "original" : profile;
+              const idx = order.indexOf(current);
+              const next = order.slice(idx + 1).find((id) => manifest?.profiles.some((p) => p.id === id));
+              waitingSince.current = null;
+              if (!next) return;
+              autoDropped.current = true;
+              setHint(`Auto stepped down to ${next} after sustained buffering.`);
+              begin(next).catch(() => undefined);
+            }, 2600);
+          }}
+          onPlaying={() => {
+            waitingSince.current = null;
+            if (waitingTimer.current != null) {
+              window.clearTimeout(waitingTimer.current);
+              waitingTimer.current = null;
             }
-            setHint("Buffering. Manual quality stays here. Auto can drop a level if that rendition exists.");
           }}
         />
 

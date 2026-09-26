@@ -5,6 +5,14 @@ const isAdminRoute = createRouteMatcher(["/admin(.*)"]);
 const isPublicRoute = createRouteMatcher(["/sign-in(.*)", "/api/auth(.*)", "/api/auth/clerk-sync"]);
 
 export default clerkMiddleware(async (auth, req) => {
+  const role = process.env.ELTORRENTO_ROLE?.trim().toLowerCase();
+  if (role === "watch" && (req.nextUrl.pathname.startsWith("/admin") || req.nextUrl.pathname.startsWith("/api/admin"))) {
+    return NextResponse.json({ error: "Admin is only on server.hasnain.us." }, { status: 404 });
+  }
+  if (role === "admin" && req.nextUrl.pathname.startsWith("/watch")) {
+    return NextResponse.redirect(new URL("/admin", req.url));
+  }
+
   if (!process.env.CLERK_SECRET_KEY) {
     return NextResponse.next();
   }

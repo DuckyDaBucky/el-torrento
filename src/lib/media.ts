@@ -79,17 +79,39 @@ export function manifestFor(user: UserRow, id: string) {
   };
 }
 
-export function openPlayback(
+export type ChangePlaybackResult = {
+  generation: number;
+  position: number;
+  profile: ProfileId;
+  streamUrl: string;
+  baseTimestamp: number;
+};
+
+function resolvedProfile(profile: ProfileId): ProfileId {
+  return profile === "auto" ? "original" : profile;
+}
+
+function buildStreamUrl(mediaId: string, generation: number, profile: ProfileId): string {
+  const playProfile = resolvedProfile(profile);
+  if (playProfile === "original") {
+    return `/api/media/${mediaId}/content?g=${generation}&profile=original`;
+  }
+  return `/api/media/${mediaId}/hls/${generation}/${playProfile}/index.m3u8`;
+}
+
+/** Single entry for seek and quality changes. */
+export async function changePlayback(
   user: UserRow,
-  id: string,
-  profile: ProfileId,
-  positionSec = 0,
-): { generation: number; position: number } {
-  mustPlayable(user, id, profile);
-  const position = Number.isFinite(positionSec) && positionSec > 0 ? positionSec : 0;
+  mediaId: string,
+  absolutePosition: number,
+  requestedQuality: ProfileId,
+): Promise<ChangePlaybackResult> {
+  const row = mustPlayable(user, mediaId, requestedQuality);
+  const position = Math.max(0, absolutePosition);
+  const profile = requestedQuality;
   const existing = getDb()
     .prepare("SELECT generation FROM playback WHERE user_id = ? AND media_id = ?")
-    .get(user.id, id) as { generation: number } | undefined;
+    .get(user.id, mediaId) as { generation: number } | undefined;
   const generation = (existing?.generation ?? 0) + 1;
   getDb()
     .prepare(
@@ -100,9 +122,32 @@ export function openPlayback(
          profile = excluded.profile,
          position_sec = excluded.position_sec`,
     )
-    .run(user.id, id, generation, position, profile);
-  audit(user.id, "play", id, "ok", `${profile}@${position}`);
-  return { generation, position };
+    .run(user.id, mediaId, generation, position, resolvedProfile(profile));
+  const byte = byteForTime(row.file_size, row.duration_sec, position);
+  const pieces = piecesCovering(
+    byte,
+    Math.min(row.file_size - 1, byte + row.piece_size * 8),
+    row.piece_size,
+    row.file_size,
+  );
+  if (pieces.length) await enginePrioritize(mediaId, pieces, 7).catch(() => undefined);
+  audit(user.id, "change-playback", mediaId, "ok", `${profile}@${position}`);
+  return {
+    generation,
+    position,
+    profile,
+    streamUrl: buildStreamUrl(mediaId, generation, profile),
+    baseTimestamp: byte,
+  };
+}
+
+export async function openPlayback(
+  user: UserRow,
+  id: string,
+  profile: ProfileId,
+  positionSec = 0,
+): Promise<ChangePlaybackResult> {
+  return changePlayback(user, id, positionSec, profile);
 }
 
 export async function seekPlayback(
@@ -110,26 +155,12 @@ export async function seekPlayback(
   id: string,
   seconds: number,
   profile: ProfileId,
-): Promise<{ generation: number; position: number }> {
-  const row = mustPlayable(user, id, profile);
+): Promise<ChangePlaybackResult> {
   const existing = getDb()
     .prepare("SELECT generation FROM playback WHERE user_id = ? AND media_id = ?")
     .get(user.id, id) as { generation: number } | undefined;
   if (!existing) throw new Error("Start playback before seeking.");
-  const generation = existing.generation + 1;
-  const position = Math.max(0, seconds);
-  getDb()
-    .prepare(
-      "UPDATE playback SET generation = ?, position_sec = ?, profile = ? WHERE user_id = ? AND media_id = ?",
-    )
-    .run(generation, position, profile, user.id, id);
-  const byte = byteForTime(row.file_size, row.duration_sec, position);
-  const pieces = piecesCovering(byte, Math.min(row.file_size - 1, byte + row.piece_size * 8), row.piece_size, row.file_size);
-  if (pieces.length) {
-    await enginePrioritize(id, pieces, 7).catch(() => undefined);
-  }
-  audit(user.id, "seek", id, "ok", `g=${generation}`);
-  return { generation, position };
+  return changePlayback(user, id, seconds, profile);
 }
 
 function mustPlayable(user: UserRow, id: string, profile: ProfileId): MediaRow {
@@ -278,7 +309,11 @@ export async function addTorrent(
   return row;
 }
 
-export function createRequest(user: UserRow, title: string): { id: string } {
+export function createRequest(
+  user: UserRow,
+  title: string,
+  meta?: { tmdbId?: string; mediaType?: string },
+): { id: string } {
   if (user.status !== "active") throw new Error("Account cannot request titles.");
   const trimmed = title.trim();
   if (!trimmed) throw new Error("Enter a title.");
@@ -291,9 +326,10 @@ export function createRequest(user: UserRow, title: string): { id: string } {
   const id = `req_${randomBytes(8).toString("hex")}`;
   getDb()
     .prepare(
-      "INSERT INTO media_requests (id, user_id, title, state, created_at, seerr_request_id) VALUES (?, ?, ?, 'requested', ?, NULL)",
+      `INSERT INTO media_requests (id, user_id, title, state, created_at, seerr_request_id, tmdb_id, media_type)
+       VALUES (?, ?, ?, 'requested', ?, NULL, ?, ?)`,
     )
-    .run(id, user.id, trimmed, new Date().toISOString());
+    .run(id, user.id, trimmed, new Date().toISOString(), meta?.tmdbId ?? null, meta?.mediaType ?? null);
   return { id };
 }
 

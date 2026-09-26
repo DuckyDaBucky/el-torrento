@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { LiveNode } from "@/src/lib/cluster";
 
-type Section = "cluster" | "users" | "media" | "services" | "mcp";
+type Section = "cluster" | "users" | "media" | "sources" | "services" | "mcp";
 
 type ClusterPayload = {
   live: { nodes: LiveNode[]; quorum: string | null; error: string | null };
@@ -101,6 +101,7 @@ function SectionNav({
     { id: "cluster", label: "Cluster" },
     { id: "users", label: "Users" },
     { id: "media", label: "Media" },
+    { id: "sources", label: "Sources" },
     { id: "services", label: "Services" },
     { id: "mcp", label: "MCP" },
   ];
@@ -147,6 +148,10 @@ export default function AdminPage() {
   const [deployDraft, setDeployDraft] = useState(() => JSON.stringify(DEPLOY_TEMPLATE, null, 2));
   const [deployPreview, setDeployPreview] = useState<{ id: string; digest: string } | null>(null);
   const [deployIssues, setDeployIssues] = useState<string[]>([]);
+  const [indexers, setIndexers] = useState<
+    { id: string; label: string; kind: string; enabled: boolean; tested: boolean; notes: string | null }[]
+  >([]);
+  const [prowlarrNote, setProwlarrNote] = useState("");
 
   const preflightById = useMemo(() => {
     const map = new Map<string, { ram: string; root: string; thinPool: string }>();
@@ -206,6 +211,21 @@ export default function AdminPage() {
     }
   }, []);
 
+  const loadSources = useCallback(async () => {
+    const { ok, data } = await api<{
+      sources: typeof indexers;
+      prowlarr: { ok: boolean; indexerCount?: number; error?: string };
+    }>("/api/admin/sources");
+    if (ok) {
+      setIndexers(data.sources ?? []);
+      setProwlarrNote(
+        data.prowlarr?.ok
+          ? `Prowlarr reachable · ${data.prowlarr.indexerCount ?? 0} indexers installed`
+          : data.prowlarr?.error ?? "Prowlarr not configured",
+      );
+    }
+  }, []);
+
   const loadMcp = useCallback(async () => {
     const { ok, data } = await api<{ tools: string[]; note?: string }>("/api/mcp");
     if (ok) setMcpTools(data.tools ?? []);
@@ -220,9 +240,10 @@ export default function AdminPage() {
     if (section === "cluster") loadCluster().catch(() => setClusterError("Could not load cluster."));
     if (section === "users") loadUsers().catch(() => undefined);
     if (section === "media") loadMedia().catch(() => undefined);
+    if (section === "sources") loadSources().catch(() => undefined);
     if (section === "services") loadServices().catch(() => undefined);
     if (section === "mcp") loadMcp().catch(() => undefined);
-  }, [gate, section, loadCluster, loadUsers, loadMedia, loadServices, loadMcp]);
+  }, [gate, section, loadCluster, loadUsers, loadMedia, loadSources, loadServices, loadMcp]);
 
   useEffect(() => {
     if (gate !== "owner" || section !== "cluster") return;
@@ -498,6 +519,63 @@ export default function AdminPage() {
                 {requests.length === 0 ? <li className="text-[var(--phosphor)]/60">No pending requests.</li> : null}
               </ul>
             </div>
+          </div>
+        ) : null}
+
+        {section === "sources" ? (
+          <div className="space-y-4 font-mono text-sm">
+            <p className="text-xs text-[var(--phosphor)]/70">{prowlarrNote}</p>
+            <p className="text-xs text-[var(--phosphor)]/60">
+              Candidates stay disabled until you mark tested after a real Prowlarr search. Private trackers stay off unless
+              you confirm access.
+            </p>
+            <ul className="space-y-2">
+              {indexers.map((item) => (
+                <li key={item.id} className="border border-[var(--term-line)] bg-black/30 p-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span>
+                      {item.label} ({item.kind}) — {item.notes}
+                    </span>
+                    <div className="flex gap-1">
+                      <Button
+                        variant="term"
+                        className="px-2 py-1 text-[10px]"
+                        onClick={async () => {
+                          await api("/api/admin/sources", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ action: "patch", id: item.id, tested: true, enabled: item.enabled }),
+                          });
+                          loadSources().catch(() => undefined);
+                        }}
+                      >
+                        mark tested
+                      </Button>
+                      <Button
+                        variant="term"
+                        className="px-2 py-1 text-[10px]"
+                        disabled={!item.tested}
+                        onClick={async () => {
+                          await api("/api/admin/sources", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              action: "patch",
+                              id: item.id,
+                              tested: true,
+                              enabled: !item.enabled,
+                            }),
+                          });
+                          loadSources().catch(() => undefined);
+                        }}
+                      >
+                        {item.enabled ? "disable" : "enable"}
+                      </Button>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
           </div>
         ) : null}
 

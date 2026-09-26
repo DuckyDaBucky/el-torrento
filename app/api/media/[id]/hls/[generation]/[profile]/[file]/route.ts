@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { getDb, readSession } from "@/src/lib/db";
 import { readSessionId } from "@/src/lib/http";
 import { ensureHls, hlsDir } from "@/src/lib/hls";
+import { readHlsFromWorker } from "@/src/lib/media-worker-client";
 import { getMedia } from "@/src/lib/media";
 import type { ProfileId } from "@/src/lib/quality";
 
@@ -29,6 +30,7 @@ export async function GET(
   if (!playback || playback.generation !== generation) {
     return NextResponse.json({ error: "This playback request is stale." }, { status: 409 });
   }
+  let useRemote = false;
   if (file === "index.m3u8") {
     try {
       const built = await ensureHls({
@@ -43,6 +45,7 @@ export async function GET(
           { status: 503, headers: { "Retry-After": "1" } },
         );
       }
+      useRemote = Boolean(built.remote);
     } catch {
       return NextResponse.json(
         { error: "The HLS worker could not start from the verified pieces." },
@@ -50,10 +53,16 @@ export async function GET(
       );
     }
   }
-  const body = await readFile(path.join(hlsDir(id, generation, profile), file)).catch(() => null);
+  let body: Buffer | null = null;
+  if (useRemote || file !== "index.m3u8") {
+    body = await readHlsFromWorker({ torrentId: id, generation, profile, file });
+  }
+  if (!body) {
+    body = await readFile(path.join(hlsDir(id, generation, profile), file)).catch(() => null);
+  }
   if (!body) return NextResponse.json({ error: "Segment not ready." }, { status: 404 });
   const type = file.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : "video/mp2t";
-  return new NextResponse(body, {
+  return new NextResponse(new Uint8Array(body), {
     headers: { "Content-Type": type, "Cache-Control": "no-store" },
   });
 }

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { engineRead, engineWait } from "./engine-client";
+import { ensureHlsOnWorker, mediaWorkerBase } from "./media-worker-client";
 
 type HlsSource = {
   id: string;
@@ -28,9 +29,24 @@ export async function ensureHls(input: {
   generation: number;
   profile: string;
   positionSec: number;
-}): Promise<{ ready: boolean; playlist?: string }> {
+}): Promise<{ ready: boolean; playlist?: string; remote?: boolean }> {
   const height = heightFor(input.profile);
   if (!height) return { ready: false };
+
+  if (mediaWorkerBase()) {
+    const remote = await ensureHlsOnWorker({
+      torrentId: input.row.id,
+      generation: input.generation,
+      profile: input.profile,
+      positionSec: input.positionSec,
+      fileSize: input.row.file_size,
+      durationSec: input.row.duration_sec,
+    });
+    if (remote.ready) {
+      return { ready: true, playlist: "remote", remote: true };
+    }
+    return { ready: false };
+  }
   const duration = input.row.duration_sec > 0 ? input.row.duration_sec : 1;
   const ratio = Math.min(0.98, Math.max(0, input.positionSec / duration));
   const start = Math.min(input.row.file_size - 1, Math.floor(ratio * input.row.file_size));

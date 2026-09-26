@@ -1,17 +1,20 @@
 import { NextResponse } from "next/server";
 import { readSession } from "@/src/lib/db";
 import { readSessionId } from "@/src/lib/http";
-import { openPlayback } from "@/src/lib/media";
+import { changePlayback } from "@/src/lib/media";
 import type { ProfileId } from "@/src/lib/quality";
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const user = readSession(readSessionId(req));
   if (!user) return NextResponse.json({ error: "Sign in required." }, { status: 401 });
   const { id } = await ctx.params;
-  const body = (await req.json().catch(() => ({}))) as { profile?: ProfileId; positionSeconds?: number };
+  const body = (await req.json().catch(() => ({}))) as {
+    positionSeconds?: number;
+    quality?: ProfileId;
+  };
   try {
     return NextResponse.json(
-      await openPlayback(user, id, body.profile ?? "original", Number(body.positionSeconds ?? 0)),
+      await changePlayback(user, id, Number(body.positionSeconds ?? 0), body.quality ?? "auto"),
     );
   } catch (error) {
     return NextResponse.json(
